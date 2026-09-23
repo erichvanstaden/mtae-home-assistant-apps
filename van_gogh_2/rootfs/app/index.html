@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MTAE Van Gogh Installer</title>
+  <style>
+    :root { color-scheme: dark; --ink:#f4f0e8; --muted:#a9b7bd; --panel:#17303c; --edge:#dcb761; --ok:#77c63b; --warn:#fa643d; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; background:linear-gradient(155deg,#0e1f29,#31545e); color:var(--ink); font:15px/1.5 system-ui,sans-serif; }
+    main { width:min(760px,calc(100% - 28px)); margin:24px auto 48px; }
+    header { display:flex; gap:18px; align-items:center; margin-bottom:20px; }
+    header img { width:84px; height:84px; border-radius:19px; }
+    h1 { margin:0; font-size:clamp(28px,6vw,44px); letter-spacing:.01em; }
+    h2 { margin:0 0 12px; font-size:19px; }
+    p { margin:5px 0; color:var(--muted); }
+    section { background:rgba(15,35,45,.9); border:1px solid rgba(220,183,97,.48); border-radius:18px; padding:20px; margin:14px 0; box-shadow:0 14px 36px rgba(0,0,0,.22); }
+    label { display:block; margin:10px 0 5px; font-weight:700; }
+    input { width:100%; padding:12px; border-radius:10px; border:1px solid #52717a; background:#0c222c; color:var(--ink); }
+    .actions { display:flex; gap:10px; flex-wrap:wrap; margin-top:14px; }
+    button { border:0; border-radius:999px; padding:11px 17px; background:var(--edge); color:#16242a; font-weight:800; cursor:pointer; }
+    button.secondary { background:#66818a; color:white; }
+    button.danger { background:var(--warn); color:white; }
+    button:disabled { opacity:.5; cursor:wait; }
+    pre { white-space:pre-wrap; overflow-wrap:anywhere; background:#08171e; color:#cae3e5; padding:13px; border-radius:10px; min-height:52px; }
+    .badge { display:inline-block; border-radius:999px; padding:3px 9px; background:#284b57; color:#d8e7e9; }
+    .marks { display:flex; align-items:center; gap:10px; margin-top:12px; }
+    .marks img { width:46px; height:46px; border-radius:11px; }
+  </style>
+</head>
+<body>
+<main>
+  <header><img src="static/van-gogh-2.png" alt="Van Gogh 2 floral icon"><div><h1>MTAE Van Gogh Installer</h1><p>Verified Van Gogh 2 installation and recovery</p></div></header>
+  <section>
+    <h2>Current state</h2><div id="summary" class="badge">Loading…</div><pre id="output">Reading installer state…</pre>
+  </section>
+  <section>
+    <h2>Private release access</h2>
+    <p>The token is stored inside this app's protected data and is never returned by the API.</p>
+    <label for="endpoint">Release endpoint</label><input id="endpoint" type="url" autocomplete="off" placeholder="Private HTTPS endpoint supplied by MTAE">
+    <label for="token">Release token</label><input id="token" type="password" autocomplete="new-password" placeholder="Protected token">
+    <div class="actions"><button onclick="saveSettings()">Save access</button><button class="secondary" onclick="checkRelease()">Check release</button></div>
+  </section>
+  <section>
+    <h2>Install and recovery</h2>
+    <p>Install/update backs up and writes only Van Gogh-owned surfaces after checksum and archive safety checks, restarts Home Assistant Core, then verifies integration, module and resource readiness. Rollback restores the recorded pre-install Van Gogh state.</p>
+    <div class="actions"><button onclick="installRelease()">Install / update</button><button class="danger" onclick="rollback()">Roll back</button><button class="secondary" onclick="restartHA()">Restart Home Assistant</button></div>
+    <div class="marks"><img src="static/mtae-installer.png" alt="MTAE installer icon"><span>MTAE owner-approved artwork</span></div>
+  </section>
+</main>
+<script>
+const output = document.getElementById('output');
+const summary = document.getElementById('summary');
+async function api(path, body) {
+  document.querySelectorAll('button').forEach(b => b.disabled = true);
+  try {
+    const response = await fetch(path, {method: body ? 'POST' : 'GET', headers:{'Content-Type':'application/json'}, body:body ? JSON.stringify(body):undefined});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    output.textContent = JSON.stringify(data, null, 2);
+    return data;
+  } catch (error) { output.textContent = `Error: ${error.message}`; throw error; }
+  finally { document.querySelectorAll('button').forEach(b => b.disabled = false); }
+}
+async function refresh() { const data=await api('api/status'); summary.textContent=data.installed_version ? `Installed ${data.installed_version}` : 'Not installed'; }
+async function saveSettings(){ await api('api/settings',{endpoint:document.getElementById('endpoint').value,token:document.getElementById('token').value}); document.getElementById('token').value=''; await refresh(); }
+async function checkRelease(){ await api('api/check',{}); }
+async function installRelease(){ if(confirm('Install or update Van Gogh 2 from the verified private release, then restart Home Assistant Core to finish setup?')) { await api('api/install',{}); await refresh(); } }
+async function rollback(){ if(confirm('Restore the exact state from before the last successful install?')) { await api('api/rollback',{confirm:'rollback'}); await refresh(); } }
+async function restartHA(){ if(confirm('Restart Home Assistant now to load the installed or restored integration?')) await api('api/restart',{confirm:'restart'}); }
+refresh();
+</script>
+</body>
+</html>
