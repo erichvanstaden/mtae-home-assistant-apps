@@ -1,7 +1,7 @@
 name: "MTAE Van Gogh Installer"
-version: "1.0.4"
+version: "1.1.0"
 slug: "van_gogh_2"
-description: "Install, update and roll back Van Gogh 2 from the private MTAE release service"
+description: "Activate, install, update and roll back Van Gogh 2 from the private MTAE release service"
 url: "https://mtae.com.au/van-gogh-2"
 arch:
   - aarch64

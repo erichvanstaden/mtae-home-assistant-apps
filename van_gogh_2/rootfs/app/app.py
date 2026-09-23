@@ -18,6 +18,9 @@ DATA_ROOT = Path(os.environ.get("VAN_GOGH_DATA_ROOT", "/data"))
 CONFIG_ROOT = Path(os.environ.get("VAN_GOGH_CONFIG_ROOT", "/homeassistant"))
 SETTINGS = DATA_ROOT / "settings.json"
 INSTALL_LOCK = threading.Lock()
+DEFAULT_RELEASE_ENDPOINT = os.environ.get(
+    "VAN_GOGH_RELEASE_ENDPOINT", "https://installer.mtae.com.au"
+).rstrip("/")
 
 
 def _atomic_settings(payload: dict[str, str]) -> None:
@@ -40,7 +43,8 @@ def _settings() -> dict[str, str]:
 
 def _release_client() -> ReleaseClient:
     current = _settings()
-    return ReleaseClient(str(current.get("endpoint", "")), str(current.get("token", "")))
+    credential = str(current.get("credential") or current.get("token") or "")
+    return ReleaseClient(DEFAULT_RELEASE_ENDPOINT, credential)
 
 
 def _status() -> dict[str, Any]:
@@ -55,8 +59,10 @@ def _status() -> dict[str, Any]:
     return {
         "application": "MTAE Van Gogh Installer",
         "installed_version": manager.installed_version(),
-        "release_endpoint_configured": bool(current.get("endpoint")),
-        "release_token_configured": bool(current.get("token")),
+        "release_endpoint_configured": True,
+        "site_credential_configured": bool(current.get("credential") or current.get("token")),
+        "site_id": current.get("site_id"),
+        "site_name": current.get("site_name"),
         "home_assistant_api_available": HAClient.from_environment() is not None,
         "restart_required": bool(receipt and receipt.get("restart_required")),
         "last_install": receipt,
@@ -135,17 +141,20 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         try:
             payload = self._body()
-            if path == "/api/settings":
-                endpoint = str(payload.get("endpoint", "")).strip().rstrip("/")
-                token = str(payload.get("token", ""))
-                ReleaseClient(endpoint, token)
-                if len(token) < 16:
-                    raise InstallError("Release token must be at least 16 characters")
-                _atomic_settings({"endpoint": endpoint, "token": token})
-                result: dict[str, Any] = {"saved": True, "token_returned": False}
+            if path == "/api/activate":
+                install_code = str(payload.get("install_code", ""))
+                activated = ReleaseClient.activate(DEFAULT_RELEASE_ENDPOINT, install_code)
+                _atomic_settings(activated)
+                result: dict[str, Any] = {
+                    "activated": True,
+                    "site_id": activated["site_id"],
+                    "site_name": activated["site_name"],
+                    "credential_returned": False,
+                    "install_code_stored": False,
+                }
             elif path == "/api/check":
                 manifest = _release_client().latest()
-                result = {"release": manifest, "token_returned": False}
+                result = {"release": manifest, "credential_returned": False}
             elif path == "/api/install":
                 if not INSTALL_LOCK.acquire(blocking=False):
                     raise InstallError("Another install or rollback is already running")

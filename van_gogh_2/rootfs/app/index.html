@@ -35,11 +35,10 @@
     <h2>Current state</h2><div id="summary" class="badge">Loading…</div><pre id="output">Reading installer state…</pre>
   </section>
   <section>
-    <h2>Private release access</h2>
-    <p>The token is stored inside this app's protected data and is never returned by the API.</p>
-    <label for="endpoint">Release endpoint</label><input id="endpoint" type="url" autocomplete="off" placeholder="Private HTTPS endpoint supplied by MTAE">
-    <label for="token">Release token</label><input id="token" type="password" autocomplete="new-password" placeholder="Protected token">
-    <div class="actions"><button onclick="saveSettings()">Save access</button><button class="secondary" onclick="checkRelease()">Check release</button></div>
+    <h2>Activate this site</h2>
+    <p>Enter the one-time MTAE Install Code supplied for this site. The code is exchanged once for a protected site credential and is not stored.</p>
+    <label for="installCode">MTAE Install Code</label><input id="installCode" type="password" autocomplete="one-time-code" placeholder="MTAE-VG-XXXX-XXXX-XXXX">
+    <div class="actions"><button onclick="activateSite()">Activate site</button><button class="secondary" onclick="checkRelease()">Check release</button></div>
   </section>
   <section>
     <h2>Install and recovery</h2>
@@ -63,7 +62,7 @@ async function api(path, body) {
   finally { document.querySelectorAll('button').forEach(b => b.disabled = false); }
 }
 async function refresh() { const data=await api('api/status'); summary.textContent=data.installed_version ? `Installed ${data.installed_version}` : 'Not installed'; }
-async function saveSettings(){ await api('api/settings',{endpoint:document.getElementById('endpoint').value,token:document.getElementById('token').value}); document.getElementById('token').value=''; await refresh(); }
+async function activateSite(){ await api('api/activate',{install_code:document.getElementById('installCode').value}); document.getElementById('installCode').value=''; await refresh(); }
 async function checkRelease(){ await api('api/check',{}); }
 async function installRelease(){ if(confirm('Install or update Van Gogh 2 from the verified private release, then restart Home Assistant Core to finish setup?')) { await api('api/install',{}); await refresh(); } }
 async function rollback(){ if(confirm('Restore the exact state from before the last successful install?')) { await api('api/rollback',{confirm:'rollback'}); await refresh(); } }

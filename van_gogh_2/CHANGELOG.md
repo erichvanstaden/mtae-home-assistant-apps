@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.0
+
+- Replace manual permanent release-token entry with one-time MTAE Install Code activation.
+- Persist only the issued revocable per-site credential in protected App data.
+- Preserve checksum verification, safe extraction, readiness gates and deterministic rollback.
+
 ## 1.0.2
 
 - Declare the least-privilege Home Assistant Supervisor role explicitly so the

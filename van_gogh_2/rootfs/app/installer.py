@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import shutil
@@ -21,6 +22,47 @@ MAX_ARCHIVE_BYTES = 100 * 1024 * 1024
 
 class InstallError(RuntimeError):
     """Raised when a release cannot be safely installed or rolled back."""
+
+
+def _normalise_endpoint(endpoint: str) -> str:
+    endpoint = endpoint.strip().rstrip("/")
+    parsed = urllib.parse.urlparse(endpoint)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise InstallError("Release endpoint must be an http(s) URL without embedded credentials")
+    if parsed.scheme == "http":
+        hostname = parsed.hostname or ""
+        private = hostname == "localhost"
+        try:
+            private = private or ipaddress.ip_address(hostname).is_private
+        except ValueError:
+            pass
+        if not private:
+            raise InstallError("Public release endpoints must use HTTPS")
+    return endpoint
+
+
+class _SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        source = urllib.parse.urlparse(req.full_url)
+        target = urllib.parse.urlparse(urllib.parse.urljoin(req.full_url, newurl))
+        if (target.scheme, target.hostname, target.port) != (
+            source.scheme,
+            source.hostname,
+            source.port,
+        ):
+            raise InstallError("Release service redirect must remain on the configured endpoint")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _urlopen(request: urllib.request.Request, timeout: int):
+    return urllib.request.build_opener(_SameOriginRedirectHandler()).open(request, timeout=timeout)
 
 
 def sha256_file(path: Path) -> str:
@@ -79,26 +121,68 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
 
 
 class ReleaseClient:
-    def __init__(self, endpoint: str, token: str) -> None:
-        endpoint = endpoint.strip().rstrip("/")
-        parsed = urllib.parse.urlparse(endpoint)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise InstallError("Release endpoint must be an http(s) URL")
-        if not token:
-            raise InstallError("Release token is required")
-        self.endpoint = endpoint
-        self.token = token
+    def __init__(self, endpoint: str, credential: str) -> None:
+        if not credential:
+            raise InstallError("Site credential is required; activate an MTAE Install Code first")
+        self.endpoint = _normalise_endpoint(endpoint)
+        self.credential = credential
+
+    @classmethod
+    def activate(cls, endpoint: str, install_code: str) -> dict[str, str]:
+        endpoint = _normalise_endpoint(endpoint)
+        install_code = install_code.strip()
+        if not install_code:
+            raise InstallError("MTAE Install Code is required")
+        body = json.dumps({"install_code": install_code}).encode("utf-8")
+        request = urllib.request.Request(
+            urllib.parse.urljoin(endpoint + "/", "api/v1/activate"),
+            method="POST",
+            data=body,
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+        )
+        try:
+            with _urlopen(request, timeout=20) as response:
+                if response.status != 201:
+                    raise InstallError(f"Install Code service returned HTTP {response.status}")
+                raw = response.read(64 * 1024)
+        except OSError as error:
+            raise InstallError(f"Install Code activation failed: {error}") from error
+        try:
+            result = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise InstallError("Install Code service returned invalid JSON") from error
+        if not isinstance(result, dict):
+            raise InstallError("Install Code service returned an invalid response")
+        credential = result.get("credential")
+        site_id = result.get("site_id")
+        if not isinstance(credential, str) or not credential.startswith("vg_site_") or len(credential) < 40:
+            raise InstallError("Install Code service did not issue a valid site credential")
+        if not isinstance(site_id, str) or len(site_id) != 32:
+            raise InstallError("Install Code service did not issue a valid site identifier")
+        return {
+            "credential": credential,
+            "site_id": site_id,
+            "site_name": str(result.get("site_label") or "Van Gogh site"),
+        }
 
     def _request(self, path_or_url: str) -> urllib.request.Request:
         url = urllib.parse.urljoin(self.endpoint + "/", path_or_url)
+        endpoint = urllib.parse.urlparse(self.endpoint)
+        target = urllib.parse.urlparse(url)
+        if (target.scheme, target.hostname, target.port) != (
+            endpoint.scheme,
+            endpoint.hostname,
+            endpoint.port,
+        ):
+            raise InstallError("Release manifest archive URL must remain on the configured endpoint")
         return urllib.request.Request(
             url,
-            headers={"Authorization": f"Bearer {self.token}", "Accept": "application/json"},
+            headers={"Authorization": f"Bearer {self.credential}", "Accept": "application/json"},
         )
 
     def latest(self) -> dict[str, Any]:
         try:
-            with urllib.request.urlopen(self._request("api/v1/van-gogh2/latest.json"), timeout=20) as response:
+            with _urlopen(self._request("api/v1/van-gogh2/latest.json"), timeout=20) as response:
                 if response.status != 200:
                     raise InstallError(f"Release endpoint returned HTTP {response.status}")
                 raw = response.read(64 * 1024)
@@ -129,7 +213,7 @@ class ReleaseClient:
         request.headers["Accept"] = "application/gzip"
         total = 0
         try:
-            with urllib.request.urlopen(request, timeout=60) as response, destination.open("wb") as output:
+            with _urlopen(request, timeout=60) as response, destination.open("wb") as output:
                 if response.status != 200:
                     raise InstallError(f"Archive endpoint returned HTTP {response.status}")
                 while True:

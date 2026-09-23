@@ -18,7 +18,7 @@ This repository contains the **MTAE Van Gogh Installer** application shell. It d
 
 4. Install **MTAE Van Gogh Installer**.
 5. Start the app and open its Web UI.
-6. Enter the private release endpoint and MTAE Install Code supplied through the authorised MTAE channel.
+6. Enter the one-time MTAE Install Code supplied through the authorised MTAE channel, then select **Activate site**. The permanent HTTPS endpoint is built into the App.
 
 ## What the Installer does
 
@@ -34,7 +34,8 @@ This repository contains the **MTAE Van Gogh Installer** application shell. It d
 ## Security boundaries
 
 - Release packages remain private and require MTAE authorisation.
-- Access credentials are stored inside the Home Assistant App data directory and are never returned by its status API.
+- The one-time Install Code is exchanged for a revocable per-site credential and is not stored.
+- The issued site credential is stored with mode `0600` inside the Home Assistant App data directory and is never returned by its status API.
 - Archive extraction rejects traversal paths, links and special files.
 - File writes are restricted to Van Gogh-owned integration and Installer state paths.
 - The Installer does not operate Home Assistant entities or equipment.
