@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.3
+
+- Wait up to 60 seconds for the newly loaded Van Gogh module route when HTTP 404 or a transport failure indicates that route registration is still in progress.
+
 ## 1.1.2
 
 - Prove post-restart Core readiness against real Supervisor responses that omit `/core/info.state`, using Core identity, live `/core/stats`, two stable matching API reads and authenticated WebSocket inventory.

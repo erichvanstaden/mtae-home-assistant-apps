@@ -563,22 +563,45 @@ class HAClient:
             raise HAError("Van Gogh Lovelace resource did not reconcile to exactly one module")
         return {"resource_id": exact[0].get("id"), "url": module_url, "count": 1}
 
-    def probe_module(self, module_url: str = MODULE_URL) -> dict[str, Any]:
+    def probe_module(
+        self,
+        module_url: str = MODULE_URL,
+        timeout: float = 60.0,
+        poll_interval: float = 2.0,
+    ) -> dict[str, Any]:
         request = urllib.request.Request(
             f"http://{self.host}:{self.port}/core{module_url}",
             headers={"Authorization": f"Bearer {self.token}"},
         )
-        try:
-            with urllib.request.urlopen(request, timeout=20) as response:
-                sample = response.read(512)
-                status = response.status
-        except urllib.error.HTTPError as error:
-            raise HAError(f"Van Gogh module returned HTTP {error.code}") from error
-        except OSError as error:
-            raise HAError("Van Gogh module request failed") from error
-        if status != 200 or not sample:
-            raise HAError("Van Gogh module was not ready")
-        return {"status": status, "nonempty": True, "url": module_url}
+        wait_seconds = max(0.0, min(timeout, 60.0))
+        deadline = time.monotonic() + wait_seconds
+        last_failure = "transient request failure"
+        while True:
+            request_timeout = min(20.0, max(0.001, deadline - time.monotonic()))
+            try:
+                with urllib.request.urlopen(request, timeout=request_timeout) as response:
+                    sample = response.read(512)
+                    status = response.status
+            except urllib.error.HTTPError as error:
+                if error.code != 404:
+                    raise HAError(f"Van Gogh module returned HTTP {error.code}") from error
+                last_failure = "HTTP 404"
+            except OSError:
+                last_failure = "transport failure"
+            else:
+                if status != 200:
+                    raise HAError(f"Van Gogh module returned HTTP {status}")
+                if not sample:
+                    raise HAError("Van Gogh module returned an empty response")
+                return {"status": status, "nonempty": True, "url": module_url}
+
+            now = time.monotonic()
+            if now >= deadline:
+                raise HAError(
+                    f"Van Gogh module was not ready within {wait_seconds:g} seconds "
+                    f"(last transient failure: {last_failure})"
+                )
+            time.sleep(min(poll_interval, deadline - now))
 
     def finish_setup(self) -> dict[str, Any]:
         config = self.wait_ready()
