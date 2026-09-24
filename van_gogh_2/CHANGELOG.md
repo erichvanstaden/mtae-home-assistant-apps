@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.1
+
+- Treat a closed restart transport as ambiguous, then require an observed Home Assistant Core stop, a post-stop Supervisor `RUNNING` state and stable repeated API/version readback before reporting readiness.
+- Keep install and rollback single-flight while exposing persistent activation, download, install, restart and verification stages in the ingress UI.
+- Record restart-cycle evidence in successful install and rollback receipts.
+
 ## 1.1.0
 
 - Replace manual permanent release-token entry with one-time MTAE Install Code activation.

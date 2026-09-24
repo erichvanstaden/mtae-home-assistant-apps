@@ -24,6 +24,18 @@
     button:disabled { opacity:.5; cursor:wait; }
     pre { white-space:pre-wrap; overflow-wrap:anywhere; background:#08171e; color:#cae3e5; padding:13px; border-radius:10px; min-height:52px; }
     .badge { display:inline-block; border-radius:999px; padding:3px 9px; background:#284b57; color:#d8e7e9; }
+    .operation { display:flex; align-items:center; gap:10px; margin:12px 0 0; padding:11px 13px; border-radius:10px; background:#102934; color:#d8e7e9; border:1px solid #365966; }
+    .operation::before { content:''; flex:0 0 10px; width:10px; height:10px; border-radius:50%; background:#66818a; }
+    .operation[data-state="running"]::before { background:var(--edge); animation:pulse 1.1s ease-in-out infinite alternate; }
+    .operation[data-state="pending"]::before { background:var(--edge); }
+    .operation[data-state="complete"]::before { background:var(--ok); }
+    .operation[data-state="error"]::before { background:var(--warn); }
+    .progress { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:6px; margin:12px 0 0; }
+    .progress span { padding:7px 5px; border-radius:8px; background:#102934; color:var(--muted); text-align:center; font-size:12px; border:1px solid #365966; }
+    .progress span.done { color:#13251b; background:var(--ok); border-color:var(--ok); font-weight:800; }
+    .progress span.current { color:#16242a; background:var(--edge); border-color:var(--edge); font-weight:800; }
+    @media (max-width:620px) { .progress { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+    @keyframes pulse { to { opacity:.28; transform:scale(.72); } }
     .marks { display:flex; align-items:center; gap:10px; margin-top:12px; }
     .marks img { width:46px; height:46px; border-radius:11px; }
   </style>
@@ -32,26 +44,102 @@
 <main>
   <header><img src="static/van-gogh-2.png" alt="Van Gogh 2 floral icon"><div><h1>MTAE Van Gogh Installer</h1><p>Verified Van Gogh 2 installation and recovery</p></div></header>
   <section>
-    <h2>Current state</h2><div id="summary" class="badge">Loading…</div><pre id="output">Reading installer state…</pre>
+    <h2>Current state</h2><div id="summary" class="badge">Loading…</div>
+    <div id="operation" class="operation" data-state="idle" aria-live="polite">Reading installer stage…</div>
+    <div class="progress" aria-label="Installation progress">
+      <span id="stageActivated">Activated</span><span id="stageChecked">Release checked</span>
+      <span id="stageInstalling">Installing</span><span id="stageRestarting">Restarting</span>
+      <span id="stageVerifying">Verifying</span><span id="stageInstalled">Installed</span>
+    </div>
+    <pre id="output">Reading installer state…</pre>
   </section>
   <section>
     <h2>Activate this site</h2>
     <p>Enter the one-time MTAE Install Code supplied for this site. The code is exchanged once for a protected site credential and is not stored.</p>
     <label for="installCode">MTAE Install Code</label><input id="installCode" type="password" autocomplete="one-time-code" placeholder="MTAE-VG-XXXX-XXXX-XXXX">
-    <div class="actions"><button onclick="activateSite()">Activate site</button><button class="secondary" onclick="checkRelease()">Check release</button></div>
+    <div class="actions"><button id="activateButton" onclick="activateSite()">Activate site</button><button id="checkButton" class="secondary" onclick="checkRelease()">Check release</button></div>
   </section>
   <section>
     <h2>Install and recovery</h2>
     <p>Install/update backs up and writes only Van Gogh-owned surfaces after checksum and archive safety checks, restarts Home Assistant Core, then verifies integration, module and resource readiness. Rollback restores the recorded pre-install Van Gogh state.</p>
-    <div class="actions"><button onclick="installRelease()">Install / update</button><button class="danger" onclick="rollback()">Roll back</button><button class="secondary" onclick="restartHA()">Restart Home Assistant</button></div>
+    <div class="actions"><button id="installButton" onclick="installRelease()">Install / update</button><button class="danger" onclick="rollback()">Roll back</button><button class="secondary" onclick="restartHA()">Restart Home Assistant</button></div>
     <div class="marks"><img src="static/mtae-installer.png" alt="MTAE installer icon"><span>MTAE owner-approved artwork</span></div>
   </section>
 </main>
 <script>
 const output = document.getElementById('output');
 const summary = document.getElementById('summary');
-async function api(path, body) {
-  document.querySelectorAll('button').forEach(b => b.disabled = true);
+const operation = document.getElementById('operation');
+let requestBusy = false;
+let serverBusy = false;
+let activated = false;
+let sessionReleaseChecked = false;
+let lastStatus = null;
+const stageLabels = {
+  idle:'Ready', activating:'Activation in progress', checking_release:'Checking the verified release',
+  downloading_release:'Downloading and verifying release', installing_files:'Installing protected files',
+  requesting_restart:'Requesting Home Assistant Core restart',
+  waiting_for_core_stop:'Waiting for Home Assistant Core to stop',
+  waiting_for_core_start:'Waiting for Home Assistant Core to start',
+  verifying_readiness:'Verifying integration and frontend readiness',
+  automatic_rollback:'Readiness failed — restoring the pre-install state',
+  restoring_files:'Restoring protected files', restoring_home_assistant:'Restoring Home Assistant state',
+  activated:'Activation complete', complete:'Operation complete', restart_pending:'Restart remains pending', failed:'Failed safely'
+};
+function updateButtons(){
+  const blocked = requestBusy || serverBusy;
+  document.querySelectorAll('button').forEach(b => b.disabled = blocked);
+  document.getElementById('activateButton').disabled = blocked || activated;
+  document.getElementById('checkButton').disabled = blocked || !activated;
+  document.getElementById('installButton').disabled = blocked || !activated || !sessionReleaseChecked;
+  document.getElementById('installCode').disabled = blocked || activated;
+}
+function renderProgress(status){
+  document.querySelectorAll('.progress span').forEach(item => item.className='');
+  if (activated) document.getElementById('stageActivated').className='done';
+  if (sessionReleaseChecked) document.getElementById('stageChecked').className='done';
+  const stage = status?.operation?.stage;
+  const operationName = status?.operation?.operation;
+  if (['downloading_release','installing_files'].includes(stage)) document.getElementById('stageInstalling').className='current';
+  if (['requesting_restart','waiting_for_core_stop','waiting_for_core_start','restart_pending'].includes(stage)) {
+    document.getElementById('stageInstalling').className='done';
+    document.getElementById('stageRestarting').className='current';
+  }
+  if (['verifying_readiness','restoring_home_assistant'].includes(stage)) {
+    document.getElementById('stageInstalling').className='done';
+    document.getElementById('stageRestarting').className='done';
+    document.getElementById('stageVerifying').className='current';
+  }
+  if (operationName === 'install' && status?.operation?.state === 'complete') {
+    ['stageInstalling','stageRestarting','stageVerifying','stageInstalled'].forEach(id => document.getElementById(id).className='done');
+  }
+  if (operationName === 'rollback' && status?.operation?.state === 'complete') document.getElementById('stageInstalled').textContent='Rolled back';
+  else document.getElementById('stageInstalled').textContent='Installed';
+}
+function renderOperation(state){
+  const current = state || {state:'idle', stage:'idle'};
+  serverBusy = ['running','pending'].includes(current.state);
+  operation.dataset.state = current.state || 'idle';
+  const label = current.message || stageLabels[current.stage] || current.stage || 'Ready';
+  operation.textContent = current.error ? `${label}: ${current.error}` : label;
+  updateButtons();
+}
+async function refresh(showOutput=false) {
+  const response = await fetch('api/status', {cache:'no-store'});
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  lastStatus = data;
+  activated = Boolean(data.site_credential_configured);
+  if (activated) document.getElementById('installCode').value='';
+  summary.textContent = data.installed_version ? `Installed ${data.installed_version}` : 'Not installed';
+  renderOperation(data.operation);
+  renderProgress(data);
+  if (showOutput) output.textContent = JSON.stringify(data, null, 2);
+  return data;
+}
+async function api(path, body, initialStage) {
+  requestBusy = true;
+  renderOperation({state:'running', stage:initialStage});
   try {
     const response = await fetch(path, {method: body ? 'POST' : 'GET', headers:{'Content-Type':'application/json'}, body:body ? JSON.stringify(body):undefined});
     const data = await response.json();
@@ -59,15 +147,19 @@ async function api(path, body) {
     output.textContent = JSON.stringify(data, null, 2);
     return data;
   } catch (error) { output.textContent = `Error: ${error.message}`; throw error; }
-  finally { document.querySelectorAll('button').forEach(b => b.disabled = false); }
+  finally {
+    requestBusy = false;
+    try { await refresh(false); } catch (error) { renderOperation({state:'error', stage:'failed'}); }
+    updateButtons();
+  }
 }
-async function refresh() { const data=await api('api/status'); summary.textContent=data.installed_version ? `Installed ${data.installed_version}` : 'Not installed'; }
-async function activateSite(){ await api('api/activate',{install_code:document.getElementById('installCode').value}); document.getElementById('installCode').value=''; await refresh(); }
-async function checkRelease(){ await api('api/check',{}); }
-async function installRelease(){ if(confirm('Install or update Van Gogh 2 from the verified private release, then restart Home Assistant Core to finish setup?')) { await api('api/install',{}); await refresh(); } }
-async function rollback(){ if(confirm('Restore the exact state from before the last successful install?')) { await api('api/rollback',{confirm:'rollback'}); await refresh(); } }
-async function restartHA(){ if(confirm('Restart Home Assistant now to load the installed or restored integration?')) await api('api/restart',{confirm:'restart'}); }
-refresh();
+async function activateSite(){ await api('api/activate',{install_code:document.getElementById('installCode').value},'activating'); document.getElementById('installCode').value=''; }
+async function checkRelease(){ await api('api/check',{},'checking_release'); sessionReleaseChecked=true; renderProgress(lastStatus); updateButtons(); }
+async function installRelease(){ if(confirm('Install or update Van Gogh 2 from the verified private release, then restart Home Assistant Core to finish setup?')) await api('api/install',{},'checking_release'); }
+async function rollback(){ if(confirm('Restore the exact state from before the last successful install?')) await api('api/rollback',{confirm:'rollback'},'restoring_files'); }
+async function restartHA(){ if(confirm('Restart Home Assistant now and verify a complete stop/start cycle?')) await api('api/restart',{confirm:'restart'},'requesting_restart'); }
+refresh(true).catch(error => { output.textContent=`Error: ${error.message}`; renderOperation({state:'error',stage:'failed'}); });
+setInterval(() => refresh(false).catch(() => {}), 1000);
 </script>
 </body>
 </html>

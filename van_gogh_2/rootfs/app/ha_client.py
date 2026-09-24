@@ -12,7 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 DOMAIN = "van_gogh2"
 MODULE_URL = "/van-gogh2-assets/2.0.0-staging.1/van-gogh2.js"
@@ -20,6 +20,10 @@ MODULE_URL = "/van-gogh2-assets/2.0.0-staging.1/van-gogh2.js"
 
 class HAError(RuntimeError):
     """Safe operational failure without credentials in its text."""
+
+
+class HARestartPending(HAError):
+    """A submitted restart has not yet produced a complete observable cycle."""
 
 
 def _is_van_gogh_resource(item: dict[str, Any]) -> bool:
@@ -275,6 +279,36 @@ class HAClient:
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise HAError(f"Home Assistant API {path} returned invalid JSON") from error
 
+    def request_supervisor_json(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        timeout: float = 20,
+    ) -> Any:
+        """Call the Supervisor API and unwrap its standard data envelope."""
+        data = json.dumps(payload).encode("utf-8") if payload is not None else None
+        request = urllib.request.Request(
+            f"http://{self.host}:{self.port}{path}",
+            method=method,
+            data=data,
+            headers={"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                body = response.read()
+        except urllib.error.HTTPError as error:
+            raise HAError(f"Supervisor API {path} returned HTTP {error.code}") from error
+        except OSError as error:
+            raise HAError(f"Supervisor API {path} is unavailable") from error
+        try:
+            result = json.loads(body.decode("utf-8")) if body else {}
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise HAError(f"Supervisor API {path} returned invalid JSON") from error
+        if isinstance(result, dict) and isinstance(result.get("data"), dict):
+            return result["data"]
+        return result
+
     def websocket(self) -> WebSocket:
         return WebSocket(self.host, self.port, "/core/websocket", self.token)
 
@@ -291,7 +325,64 @@ class HAClient:
             time.sleep(2)
         raise HAError(f"Home Assistant Core did not become ready: {last_error}")
 
-    def restart(self) -> None:
+    def wait_stable_ready(
+        self,
+        timeout: float = 180,
+        stable_reads: int = 2,
+        poll_interval: float = 2,
+    ) -> dict[str, Any]:
+        """Require repeated matching API/version readback after Core returns."""
+        deadline = time.monotonic() + timeout
+        last_error = "not ready"
+        last_version: str | None = None
+        consecutive = 0
+        while time.monotonic() < deadline:
+            try:
+                config = self.request_json("GET", "/config", timeout=8)
+                version = config.get("version") if isinstance(config, dict) else None
+                if isinstance(version, str) and version:
+                    consecutive = consecutive + 1 if version == last_version else 1
+                    last_version = version
+                    if consecutive >= stable_reads:
+                        return config
+                else:
+                    last_error = "Home Assistant API returned no version"
+                    consecutive = 0
+                    last_version = None
+            except HAError as error:
+                last_error = str(error)
+                consecutive = 0
+                last_version = None
+            time.sleep(poll_interval)
+        raise HAError(f"Home Assistant Core did not become stably ready: {last_error}")
+
+    def wait_supervisor_core_running(
+        self,
+        timeout: float = 180,
+        poll_interval: float = 2,
+    ) -> dict[str, Any]:
+        """Require Supervisor to explicitly report Core RUNNING."""
+        deadline = time.monotonic() + timeout
+        last_state = "unavailable"
+        while time.monotonic() < deadline:
+            try:
+                info = self.request_supervisor_json("GET", "/core/info", timeout=8)
+                if isinstance(info, dict):
+                    last_state = str(info.get("state", "unknown"))
+                    if last_state.lower() == "running":
+                        return info
+            except HAError as error:
+                last_state = str(error)
+            time.sleep(poll_interval)
+        raise HAError(f"Supervisor did not report Core RUNNING: {last_state}")
+
+    def restart(self) -> dict[str, Any]:
+        """Request a Core restart, retaining transport ambiguity for cycle verification.
+
+        Supervisor can close the connection while carrying out an accepted restart.
+        An explicit HTTP error is a rejection; a transport failure is not success by
+        itself and must be followed by an observed down/up cycle.
+        """
         request = urllib.request.Request(
             f"http://{self.host}:{self.port}/core/restart",
             method="POST",
@@ -302,10 +393,63 @@ class HAClient:
             with urllib.request.urlopen(request, timeout=20) as response:
                 if response.status not in {200, 201}:
                     raise HAError(f"Home Assistant restart returned HTTP {response.status}")
+                return {"request_state": "accepted", "http_status": response.status}
         except urllib.error.HTTPError as error:
             raise HAError(f"Home Assistant restart returned HTTP {error.code}") from error
-        except OSError as error:
-            raise HAError("Home Assistant restart request failed") from error
+        except OSError:
+            return {"request_state": "transport_ambiguous", "http_status": None}
+
+    def restart_and_wait_ready(
+        self,
+        down_timeout: float = 180,
+        core_running_timeout: float = 180,
+        ready_timeout: float = 180,
+        poll_interval: float = 1,
+        progress: Callable[[str], None] | None = None,
+    ) -> dict[str, Any]:
+        """Require a proven Core down→up cycle after requesting a restart."""
+        request = self.restart()
+        if progress is not None:
+            progress("waiting_for_core_stop")
+        down_deadline = time.monotonic() + down_timeout
+        while time.monotonic() < down_deadline:
+            try:
+                self.request_json("GET", "/config", timeout=2)
+            except HAError:
+                break
+            time.sleep(poll_interval)
+        else:
+            raise HARestartPending("Restart request did not observe Home Assistant Core stop")
+
+        if progress is not None:
+            progress("waiting_for_core_start")
+        try:
+            core_info = self.wait_supervisor_core_running(
+                timeout=core_running_timeout,
+                poll_interval=poll_interval,
+            )
+            config = self.wait_stable_ready(
+                timeout=ready_timeout,
+                stable_reads=2,
+                poll_interval=poll_interval,
+            )
+        except HAError as error:
+            raise HARestartPending(
+                f"Home Assistant Core stopped but did not return to stable readiness: {error}"
+            ) from error
+        supervisor_version = core_info.get("version")
+        if supervisor_version and config.get("version") != supervisor_version:
+            raise HARestartPending(
+                "Supervisor Core version and stable Home Assistant API version did not match"
+            )
+        return {
+            **request,
+            "down_observed": True,
+            "supervisor_state": "running",
+            "supervisor_version": supervisor_version,
+            "ready_observed": True,
+            "core_version": config.get("version"),
+        }
 
     def entries(self) -> list[dict[str, Any]]:
         with self.websocket() as connection:
