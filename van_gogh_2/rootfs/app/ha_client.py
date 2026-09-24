@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import os
 import socket
 import struct
@@ -361,16 +362,45 @@ class HAClient:
         timeout: float = 180,
         poll_interval: float = 2,
     ) -> dict[str, Any]:
-        """Require Supervisor to explicitly report Core RUNNING."""
+        """Require Supervisor Core identity and structurally valid live metrics.
+
+        Current Supervisor releases omit ``state`` from ``/core/info``.  When a
+        state is supplied it must still explicitly be RUNNING.
+        """
         deadline = time.monotonic() + timeout
         last_state = "unavailable"
         while time.monotonic() < deadline:
             try:
                 info = self.request_supervisor_json("GET", "/core/info", timeout=8)
-                if isinstance(info, dict):
-                    last_state = str(info.get("state", "unknown"))
-                    if last_state.lower() == "running":
-                        return info
+                if not isinstance(info, dict):
+                    last_state = "Core info was not an object"
+                else:
+                    state = info.get("state")
+                    if state is not None and str(state).lower() != "running":
+                        last_state = f"state {state}"
+                    elif not all(
+                        isinstance(info.get(key), str) and bool(info[key])
+                        for key in ("version", "image", "machine", "arch")
+                    ):
+                        last_state = "Core info omitted version or identity"
+                    else:
+                        stats = self.request_supervisor_json("GET", "/core/stats", timeout=8)
+                        required = (
+                            ("online_cpus", 1, False),
+                            ("memory_limit", 0, True),
+                            ("memory_usage", 0, False),
+                            ("cpu_percent", 0, False),
+                        )
+                        if not isinstance(stats, dict) or not all(
+                            isinstance(stats.get(key), (int, float))
+                            and not isinstance(stats[key], bool)
+                            and math.isfinite(float(stats[key]))
+                            and (stats[key] > minimum if strict else stats[key] >= minimum)
+                            for key, minimum, strict in required
+                        ):
+                            last_state = "Core stats were not structurally valid live metrics"
+                        else:
+                            return {"core_info": info, "core_stats": stats}
             except HAError as error:
                 last_state = str(error)
             time.sleep(poll_interval)
@@ -424,37 +454,50 @@ class HAClient:
         if progress is not None:
             progress("waiting_for_core_start")
         try:
-            core_info = self.wait_supervisor_core_running(
+            supervisor = self.wait_supervisor_core_running(
                 timeout=core_running_timeout,
                 poll_interval=poll_interval,
             )
+            core_info = supervisor["core_info"]
             config = self.wait_stable_ready(
                 timeout=ready_timeout,
                 stable_reads=2,
                 poll_interval=poll_interval,
             )
+            supervisor_version = core_info.get("version")
+            if supervisor_version and config.get("version") != supervisor_version:
+                raise HARestartPending(
+                    "Supervisor Core version and stable Home Assistant API version did not match"
+                )
+            inventory = self.entries()
+        except HARestartPending:
+            raise
         except HAError as error:
             raise HARestartPending(
                 f"Home Assistant Core stopped but did not return to stable readiness: {error}"
             ) from error
-        supervisor_version = core_info.get("version")
-        if supervisor_version and config.get("version") != supervisor_version:
-            raise HARestartPending(
-                "Supervisor Core version and stable Home Assistant API version did not match"
-            )
         return {
             **request,
             "down_observed": True,
-            "supervisor_state": "running",
+            "supervisor_state": core_info.get("state") or "live_metrics_verified",
             "supervisor_version": supervisor_version,
+            "core_info_verified": True,
+            "core_stats_verified": True,
             "ready_observed": True,
             "core_version": config.get("version"),
+            "websocket_inventory_verified": True,
+            "websocket_inventory_entries": len(inventory),
         }
 
     def entries(self) -> list[dict[str, Any]]:
-        with self.websocket() as connection:
-            result = connection.call({"type": "config_entries/get"})
-        return result if isinstance(result, list) else []
+        try:
+            with self.websocket() as connection:
+                result = connection.call({"type": "config_entries/get"})
+        except OSError as error:
+            raise HAError("Home Assistant WebSocket transport failed") from error
+        if not isinstance(result, list):
+            raise HAError("Home Assistant WebSocket returned an invalid config entry list")
+        return result
 
     def resources(self) -> list[dict[str, Any]]:
         with self.websocket() as connection:

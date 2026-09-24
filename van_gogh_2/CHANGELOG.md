@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.2
+
+- Prove post-restart Core readiness against real Supervisor responses that omit `/core/info.state`, using Core identity, live `/core/stats`, two stable matching API reads and authenticated WebSocket inventory.
+- Continue to fail closed when Supervisor supplies an explicit non-running state or when identity, live metrics, API version or WebSocket proof is invalid.
+
 ## 1.1.1
 
 - Treat a closed restart transport as ambiguous, then require an observed Home Assistant Core stop, a post-stop Supervisor `RUNNING` state and stable repeated API/version readback before reporting readiness.
