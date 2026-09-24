@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.4
+
+- Probe the installed browser module at the validated direct Home Assistant Core origin reported by Supervisor instead of an unsupported Supervisor static-asset path.
+
 ## 1.1.3
 
 - Wait up to 60 seconds for the newly loaded Van Gogh module route when HTTP 404 or a transport failure indicates that route registration is still in progress.

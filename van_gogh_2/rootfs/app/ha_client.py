@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import ipaddress
 import json
 import math
 import os
@@ -313,6 +314,20 @@ class HAClient:
     def websocket(self) -> WebSocket:
         return WebSocket(self.host, self.port, "/core/websocket", self.token)
 
+    def core_asset_origin(self) -> str:
+        """Resolve the direct Core origin for browser assets from Supervisor facts."""
+        info = self.request_supervisor_json("GET", "/core/info", timeout=8)
+        address_value = info.get("ip_address") if isinstance(info, dict) else None
+        port = info.get("port") if isinstance(info, dict) else None
+        try:
+            address = ipaddress.ip_address(address_value) if isinstance(address_value, str) else None
+        except ValueError:
+            address = None
+        if address is None or not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+            raise HAError("Supervisor Core asset origin was invalid")
+        host = f"[{address.compressed}]" if address.version == 6 else address.compressed
+        return f"http://{host}:{port}"
+
     def wait_ready(self, timeout: float = 180) -> dict[str, Any]:
         deadline = time.monotonic() + timeout
         last_error = "not ready"
@@ -569,10 +584,7 @@ class HAClient:
         timeout: float = 60.0,
         poll_interval: float = 2.0,
     ) -> dict[str, Any]:
-        request = urllib.request.Request(
-            f"http://{self.host}:{self.port}/core{module_url}",
-            headers={"Authorization": f"Bearer {self.token}"},
-        )
+        request = urllib.request.Request(f"{self.core_asset_origin()}{module_url}")
         wait_seconds = max(0.0, min(timeout, 60.0))
         deadline = time.monotonic() + wait_seconds
         last_failure = "transient request failure"
