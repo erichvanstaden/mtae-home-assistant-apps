@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 DOMAIN = "van_gogh2"
-MODULE_URL = "/van-gogh2-assets/2.0.0-staging.1/van-gogh2.js"
+MODULE_URL = "/van-gogh2-assets/2.0.0-staging.2/van-gogh2.js"
 
 
 class HAError(RuntimeError):

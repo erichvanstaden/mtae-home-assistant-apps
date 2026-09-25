@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.5
+
+- Expose the additive Van Gogh 2 `2.0.0-staging.2` release and verify the matching frontend module after Home Assistant restarts.
+
 ## 1.1.4
 
 - Probe the installed browser module at the validated direct Home Assistant Core origin reported by Supervisor instead of an unsupported Supervisor static-asset path.
