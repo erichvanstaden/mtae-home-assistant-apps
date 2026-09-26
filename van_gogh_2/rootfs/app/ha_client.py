@@ -7,6 +7,7 @@ import ipaddress
 import json
 import math
 import os
+import re
 import socket
 import struct
 import time
@@ -18,6 +19,10 @@ from typing import Any, Callable
 
 DOMAIN = "van_gogh2"
 MODULE_URL = "/van-gogh2-assets/2.0.0-staging.2/van-gogh2.js"
+RELEASE_VERSION_PATTERN = re.compile(
+    r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+    r"(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?"
+)
 
 
 class HAError(RuntimeError):
@@ -26,6 +31,17 @@ class HAError(RuntimeError):
 
 class HARestartPending(HAError):
     """A submitted restart has not yet produced a complete observable cycle."""
+
+
+def module_url_for_release(release_version: str) -> str:
+    """Return the exact module URL for a safe release-manifest version segment."""
+    if (
+        not isinstance(release_version, str)
+        or len(release_version) > 128
+        or not RELEASE_VERSION_PATTERN.fullmatch(release_version)
+    ):
+        raise HAError("Van Gogh release manifest version is invalid")
+    return f"/van-gogh2-assets/{release_version}/van-gogh2.js"
 
 
 def _is_van_gogh_resource(item: dict[str, Any]) -> bool:
@@ -615,11 +631,12 @@ class HAClient:
                 )
             time.sleep(min(poll_interval, deadline - now))
 
-    def finish_setup(self) -> dict[str, Any]:
+    def finish_setup(self, release_version: str) -> dict[str, Any]:
+        module_url = module_url_for_release(release_version)
         config = self.wait_ready()
         entry = self.ensure_config_entry()
-        resource = self.ensure_resource()
-        module = self.probe_module()
+        resource = self.ensure_resource(module_url)
+        module = self.probe_module(module_url)
         return {
             "core_version": config.get("version"),
             "integration": entry,

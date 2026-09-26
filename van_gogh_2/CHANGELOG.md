@@ -1,8 +1,12 @@
+# Changelog
+
+## 1.1.7
+
+- Derive post-restart resource reconciliation and module probing from the validated installed release-manifest version so staging.3 installs verify the matching staging.3 frontend asset.
+
 ## 1.1.6
 
 - Use the owner-approved MTAE Installer icon for the Home Assistant app card and ingress header.
-
-# Changelog
 
 ## 1.1.5
 

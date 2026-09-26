@@ -10,7 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from ha_client import HAClient, HAError, HARestartPending
+from ha_client import HAClient, HAError, HARestartPending, module_url_for_release
 from installer import InstallError, InstallManager, ReleaseClient
 
 APP_ROOT = Path(__file__).resolve().parent
@@ -257,6 +257,7 @@ class Handler(BaseHTTPRequestHandler):
                     operation_id = _operation_begin("install", "checking_release")
                     client = _release_client()
                     manifest = client.latest()
+                    module_url_for_release(manifest["version"])
                     manager = InstallManager(CONFIG_ROOT)
                     ha = HAClient.from_environment()
                     prestate = ha.snapshot() if ha is not None else None
@@ -274,7 +275,7 @@ class Handler(BaseHTTPRequestHandler):
                                 progress=lambda stage: _operation_update(operation_id, stage)
                             )
                             _operation_update(operation_id, "verifying_readiness")
-                            readiness = ha.finish_setup()
+                            readiness = ha.finish_setup(manifest["version"])
                             readiness["restart_cycle"] = restart_cycle
                             receipt = manager.annotate_current({
                                 "readiness": readiness,
