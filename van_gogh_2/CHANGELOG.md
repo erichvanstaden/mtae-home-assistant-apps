@@ -1,3 +1,7 @@
+## 1.1.6
+
+- Use the owner-approved MTAE Installer icon for the Home Assistant app card and ingress header.
+
 # Changelog
 
 ## 1.1.5
