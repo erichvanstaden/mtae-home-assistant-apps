@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.8
+
+- Publish the Installer refresh for the immutable Van Gogh 2 `2.0.0-staging.4` private release while preserving the existing activation, checksum, installation, readiness and rollback logic.
+
 ## 1.1.7
 
 - Derive post-restart resource reconciliation and module probing from the validated installed release-manifest version so staging.3 installs verify the matching staging.3 frontend asset.
