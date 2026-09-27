@@ -4,7 +4,9 @@ import os
 import sys
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "van_gogh_2" / "rootfs" / "app"
@@ -13,8 +15,66 @@ os.environ.setdefault("VAN_GOGH_DATA_ROOT", tempfile.mkdtemp(prefix="vg-test-dat
 os.environ.setdefault("VAN_GOGH_CONFIG_ROOT", tempfile.mkdtemp(prefix="vg-test-config-"))
 
 import app  # noqa: E402
-from ha_client import HAClient, HAError  # noqa: E402
+from ha_client import HAClient, HADashboardWriteError, HAError  # noqa: E402
 from installer import InstallError  # noqa: E402
+
+
+def migration_snapshot(path: str = "client-selected-path") -> dict:
+    config = {
+        "views": [{
+            "type": "custom:van-gogh-wall10-view",
+            "path": "local-home",
+            "cards": [
+                {"type": "custom:van-gogh2-home-header-card", "schema_version": 1},
+                {"type": "custom:van-gogh2-home-climate-card", "schema_version": 1, "entity": "climate.local"},
+                *[
+                    {"type": "custom:van-gogh-c-bay-card", "schema_version": 1, "bay": bay, "mode": "empty", "cards": []}
+                    for bay in ("C1-C2", "C3-C4", "C5-C6", "C7-C8")
+                ],
+                {"type": "custom:van-gogh2-quick-actions-card", "schema_version": 1, "actions": []},
+                {"type": "custom:van-gogh2-navigation-card", "schema_version": 1, "routes": [{"path": "/local/home"}]},
+            ],
+        }],
+    }
+    return {
+        "registry": {"id": "local-id", "url_path": path, "title": "Local", "mode": "storage"},
+        "config": config,
+    }
+
+
+class FakeManager:
+    def __init__(self, *_args, **_kwargs):
+        pass
+
+    def installed_version(self):
+        return app.EXPECTED_RELEASE
+
+
+class FakeMigrationHA:
+    def __init__(self, snapshot: dict, *, write_error: bool = False):
+        self.before = deepcopy(snapshot)
+        self.current = deepcopy(snapshot)
+        self.write_error = write_error
+        self.save_calls = 0
+        self.restore_calls = 0
+
+    def wait_ready(self):
+        return {"version": app.MIGRATION_HOME_ASSISTANT}
+
+    def storage_dashboard_inventory(self):
+        return [deepcopy(self.current)]
+
+    def save_existing_dashboard(self, url_path, expected, candidate):
+        self.save_calls += 1
+        self.current["config"] = deepcopy(candidate)
+        if self.write_error:
+            raise HADashboardWriteError("simulated unverified write")
+        return {"url_path": url_path, "readback_verified": True, "dashboard_writes": 1}
+
+    def restore_dashboard(self, snapshot):
+        self.restore_calls += 1
+        self.current = {"registry": deepcopy(snapshot["registry"]), "config": deepcopy(snapshot["config"])}
+        return {"readback_verified": True}
 
 
 class FakeConnection:
@@ -162,6 +222,44 @@ class Installer110ContractTests(unittest.TestCase):
         client = HAClient(token="test")
         with self.assertRaises(HAError):
             client.save_review_dashboard("../ellie-family", {"views": [{}]}, title="Review")
+
+    def test_generic_home_migration_saves_and_verifies_one_discovered_dashboard(self):
+        fake = FakeMigrationHA(migration_snapshot())
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.object(app, "InstallManager", FakeManager), \
+             patch.object(app.HAClient, "from_environment", return_value=fake), \
+             patch.object(app, "HOME_MIGRATION_PRESTATE", Path(temporary) / "prestate.json"):
+            result = app._home_c_grid_migration()
+        self.assertTrue(result["migrated"])
+        self.assertEqual(result["dashboard_path"], "client-selected-path")
+        self.assertEqual(fake.save_calls, 1)
+        self.assertEqual(fake.restore_calls, 0)
+
+    def test_generic_home_migration_automatically_restores_an_unverified_write(self):
+        original = migration_snapshot()
+        fake = FakeMigrationHA(original, write_error=True)
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.object(app, "InstallManager", FakeManager), \
+             patch.object(app.HAClient, "from_environment", return_value=fake), \
+             patch.object(app, "HOME_MIGRATION_PRESTATE", Path(temporary) / "prestate.json"):
+            with self.assertRaises(HADashboardWriteError):
+                app._home_c_grid_migration()
+        self.assertEqual(fake.save_calls, 1)
+        self.assertEqual(fake.restore_calls, 1)
+        self.assertEqual(fake.current["config"], original["config"])
+
+    def test_generic_home_migration_unsupported_schema_has_zero_dashboard_writes(self):
+        unsupported = migration_snapshot()
+        unsupported["config"]["views"][0]["cards"][2]["bay"] = "unsupported"
+        fake = FakeMigrationHA(unsupported)
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.object(app, "InstallManager", FakeManager), \
+             patch.object(app.HAClient, "from_environment", return_value=fake), \
+             patch.object(app, "HOME_MIGRATION_PRESTATE", Path(temporary) / "prestate.json"):
+            with self.assertRaises(InstallError):
+                app._home_c_grid_migration()
+        self.assertEqual(fake.save_calls, 0)
+        self.assertEqual(fake.restore_calls, 0)
 
 
 if __name__ == "__main__":

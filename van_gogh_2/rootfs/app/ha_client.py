@@ -33,6 +33,10 @@ class HARestartPending(HAError):
     """A submitted restart has not yet produced a complete observable cycle."""
 
 
+class HADashboardWriteError(HAError):
+    """A dashboard write was submitted but did not produce verified readback."""
+
+
 def module_url_for_release(release_version: str) -> str:
     """Return the exact module URL for a safe release-manifest version segment."""
     if (
@@ -534,6 +538,64 @@ class HAClient:
         with self.websocket() as connection:
             result = connection.call({"type": "lovelace/resources"})
         return result if isinstance(result, list) else []
+
+    def storage_dashboard_inventory(self) -> list[dict[str, Any]]:
+        """Read every storage dashboard for product/schema marker discovery."""
+        with self.websocket() as connection:
+            rows = connection.call({"type": "lovelace/dashboards/list"})
+            if not isinstance(rows, list):
+                raise HAError("Home Assistant returned an invalid dashboard list")
+            inventory = []
+            for row in rows:
+                if not isinstance(row, dict) or row.get("mode") != "storage":
+                    continue
+                url_path = row.get("url_path")
+                if not isinstance(url_path, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", url_path):
+                    raise HAError("Home Assistant returned an invalid storage dashboard path")
+                config = connection.call({"type": "lovelace/config", "url_path": url_path})
+                if not isinstance(config, dict):
+                    raise HAError("Home Assistant returned an invalid storage dashboard config")
+                inventory.append({
+                    "registry": {
+                        key: row.get(key)
+                        for key in ("id", "url_path", "title", "icon", "show_in_sidebar", "require_admin", "mode")
+                    },
+                    "config": config,
+                })
+        return inventory
+
+    def save_existing_dashboard(
+        self,
+        url_path: str,
+        expected: dict[str, Any],
+        candidate: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Compare-and-save one discovered storage dashboard with exact readback."""
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", url_path):
+            raise HAError("Dashboard path is invalid")
+        if not isinstance(expected.get("views"), list) or not isinstance(candidate.get("views"), list):
+            raise HAError("Dashboard config must contain views")
+        if expected == candidate:
+            raise HAError("Dashboard candidate does not contain a migration")
+        with self.websocket() as connection:
+            rows = connection.call({"type": "lovelace/dashboards/list"})
+            matches = [
+                row for row in rows
+                if isinstance(row, dict) and row.get("url_path") == url_path
+            ] if isinstance(rows, list) else []
+            if len(matches) != 1 or matches[0].get("mode") != "storage":
+                raise HAError("Discovered dashboard identity changed before migration")
+            current = connection.call({"type": "lovelace/config", "url_path": url_path})
+            if current != expected:
+                raise HAError("Discovered dashboard config changed before migration")
+            try:
+                connection.call({"type": "lovelace/config/save", "url_path": url_path, "config": candidate})
+                saved = connection.call({"type": "lovelace/config", "url_path": url_path})
+            except Exception as error:
+                raise HADashboardWriteError("Dashboard migration write did not return verified readback") from error
+        if saved != candidate:
+            raise HADashboardWriteError("Dashboard migration exact save/readback verification failed")
+        return {"url_path": url_path, "readback_verified": True, "dashboard_writes": 1}
 
     def dashboard_snapshot(self, url_path: str) -> dict[str, Any]:
         """Capture one storage dashboard without reading or changing other dashboards."""

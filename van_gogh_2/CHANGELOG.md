@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.14
+
+- Add a generic, idempotent Van Gogh Home product-schema migration from the recognised four legacy C-bays to the approved one-parent C1-C8 grid.
+- Discover the eligible storage dashboard by Van Gogh view/card schema markers rather than by customer identity, host, activation name, title or dashboard path.
+- Preserve site-local bindings, feature choices, routes, unrelated cards and all other views; unsupported or ambiguous schemas fail before any Home Assistant dashboard write.
+- Capture exact migration prestate, compare before save, verify exact post-write readback and automatically restore after an unverified write.
+- Add explicit migration rollback in the Installer UI and API.
+
 ## 1.1.13
 
 - Pin the corrected immutable Van Gogh 2 `2.0.0-staging.8` package identity and archive checksum while preserving the Installer 1.1.12 transport, restart, resource, dashboard and rollback behaviour.

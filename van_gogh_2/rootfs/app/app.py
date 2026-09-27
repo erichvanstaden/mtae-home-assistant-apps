@@ -1,6 +1,7 @@
 """Ingress web application for Van Gogh 2 install/update/rollback."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -10,8 +11,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from ha_client import HAClient, HAError, HARestartPending, module_url_for_release
+from ha_client import HAClient, HADashboardWriteError, HAError, HARestartPending, module_url_for_release
 from installer import InstallError, InstallManager, ReleaseClient
+from dashboard_migration import MigrationError, discover_dashboard
 
 APP_ROOT = Path(__file__).resolve().parent
 DATA_ROOT = Path(os.environ.get("VAN_GOGH_DATA_ROOT", "/data"))
@@ -19,6 +21,7 @@ CONFIG_ROOT = Path(os.environ.get("VAN_GOGH_CONFIG_ROOT", "/homeassistant"))
 SETTINGS = DATA_ROOT / "settings.json"
 OPERATION_RECEIPT = DATA_ROOT / "operation.json"
 REVIEW_DASHBOARD_PRESTATE = DATA_ROOT / "review-dashboard-prestate.json"
+HOME_MIGRATION_PRESTATE = DATA_ROOT / "home-c-grid-migration-prestate.json"
 INSTALL_LOCK = threading.Lock()
 OPERATION_LOCK = threading.Lock()
 DEFAULT_RELEASE_ENDPOINT = os.environ.get(
@@ -27,6 +30,7 @@ DEFAULT_RELEASE_ENDPOINT = os.environ.get(
 EXPECTED_RELEASE = "2.0.0-staging.8"
 EXPECTED_RELEASE_SHA256 = "107df657855e84de49fd944eb70ad652b345d205100a9df5f8505581ddc5a0e9"
 EXPECTED_HOME_ASSISTANT = "2026.8.3"
+MIGRATION_HOME_ASSISTANT = "2026.9.3"
 REVIEW_DASHBOARD_PATH = "van-gogh-c-grid-review"
 
 
@@ -117,11 +121,11 @@ def _atomic_private_json(path: Path, payload: dict[str, Any]) -> None:
 def _validate_release_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     supported = manifest.get("supported_home_assistant")
     if manifest.get("version") != EXPECTED_RELEASE:
-        raise InstallError(f"Installer 1.1.13 requires Van Gogh {EXPECTED_RELEASE}")
+        raise InstallError(f"Installer 1.1.14 requires Van Gogh {EXPECTED_RELEASE}")
     if manifest.get("sha256") != EXPECTED_RELEASE_SHA256:
-        raise InstallError("Van Gogh staging.8 archive identity did not match Installer 1.1.13")
+        raise InstallError("Van Gogh staging.8 archive identity did not match Installer 1.1.14")
     if not isinstance(supported, dict) or supported.get("minimum") != EXPECTED_HOME_ASSISTANT or supported.get("tested") != EXPECTED_HOME_ASSISTANT:
-        raise InstallError(f"Installer 1.1.13 requires Home Assistant {EXPECTED_HOME_ASSISTANT} release metadata")
+        raise InstallError(f"Installer 1.1.14 requires Home Assistant {EXPECTED_HOME_ASSISTANT} release metadata")
     return manifest
 
 
@@ -132,6 +136,64 @@ def _review_config(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(config.get("views"), list) or not config["views"]:
         raise InstallError("Review dashboard config must contain at least one view")
     return config
+
+
+def _json_sha256(value: Any) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _home_c_grid_migration() -> dict[str, Any]:
+    """Discover and migrate one supported Van Gogh Home schema, or write nothing."""
+    manager = InstallManager(CONFIG_ROOT)
+    if manager.installed_version() != EXPECTED_RELEASE:
+        raise InstallError(f"Install and verify Van Gogh {EXPECTED_RELEASE} before migrating Home")
+    ha = HAClient.from_environment()
+    if ha is None:
+        raise InstallError("Supervisor API token is unavailable")
+    core = ha.wait_ready()
+    if core.get("version") != MIGRATION_HOME_ASSISTANT:
+        raise InstallError(f"Home schema migration requires Home Assistant {MIGRATION_HOME_ASSISTANT}")
+    try:
+        plan = discover_dashboard(ha.storage_dashboard_inventory())
+    except MigrationError as error:
+        raise InstallError(str(error)) from error
+    if not plan.changed:
+        return {
+            "migrated": False,
+            "already_current": True,
+            "dashboard_path": plan.url_path,
+            "config_sha256": _json_sha256(plan.before),
+            "dashboard_writes": 0,
+            "readback_verified": True,
+        }
+    prestate = {
+        "url_path": plan.url_path,
+        "exists": True,
+        "registry": plan.registry,
+        "config": plan.before,
+    }
+    _atomic_private_json(HOME_MIGRATION_PRESTATE, prestate)
+    try:
+        result = ha.save_existing_dashboard(plan.url_path, plan.before, plan.after)
+    except HADashboardWriteError:
+        ha.restore_dashboard(prestate)
+        raise
+    try:
+        verified = discover_dashboard(ha.storage_dashboard_inventory())
+        if verified.url_path != plan.url_path or verified.state != "current" or verified.before != plan.after:
+            raise HAError("Home schema migration post-change discovery did not match the exact candidate")
+    except Exception:
+        ha.restore_dashboard(prestate)
+        raise
+    return {
+        "migrated": True,
+        "already_current": False,
+        "dashboard_path": plan.url_path,
+        "before_sha256": _json_sha256(plan.before),
+        "config_sha256": _json_sha256(plan.after),
+        **result,
+    }
 
 
 def _settings() -> dict[str, str]:
@@ -172,6 +234,8 @@ def _status() -> dict[str, Any]:
         "operation": _operation_snapshot(),
         "supported_release": EXPECTED_RELEASE,
         "supported_home_assistant": EXPECTED_HOME_ASSISTANT,
+        "home_schema_migration_home_assistant": MIGRATION_HOME_ASSISTANT,
+        "home_schema_migration_prestate_available": HOME_MIGRATION_PRESTATE.is_file(),
         "review_dashboard_path": REVIEW_DASHBOARD_PATH,
     }
 
@@ -351,6 +415,43 @@ class Handler(BaseHTTPRequestHandler):
                             else "Installed; Home Assistant restart required"
                         ),
                     )
+                finally:
+                    INSTALL_LOCK.release()
+            elif path == "/api/home-schema/migrate":
+                if payload.get("confirm") != "migrate":
+                    raise InstallError("Home schema migration requires confirm=migrate")
+                if not INSTALL_LOCK.acquire(blocking=False):
+                    raise InstallError("Another installer operation is already running")
+                try:
+                    operation_id = _operation_begin("home_schema_migration", "discovering_home_schema")
+                    result = _home_c_grid_migration()
+                    _operation_update(
+                        operation_id,
+                        "complete",
+                        "complete",
+                        message=(
+                            "Home C-grid schema migrated and verified"
+                            if result["migrated"]
+                            else "Home C-grid schema is already current"
+                        ),
+                    )
+                finally:
+                    INSTALL_LOCK.release()
+            elif path == "/api/home-schema/rollback":
+                if payload.get("confirm") != "rollback":
+                    raise InstallError("Home schema rollback requires confirm=rollback")
+                if not HOME_MIGRATION_PRESTATE.is_file():
+                    raise InstallError("No Home schema migration prestate is available")
+                if not INSTALL_LOCK.acquire(blocking=False):
+                    raise InstallError("Another installer operation is already running")
+                try:
+                    operation_id = _operation_begin("home_schema_rollback", "restoring_home_schema")
+                    ha = HAClient.from_environment()
+                    if ha is None:
+                        raise InstallError("Supervisor API token is unavailable")
+                    prestate = json.loads(HOME_MIGRATION_PRESTATE.read_text(encoding="utf-8"))
+                    result = {"home_schema": ha.restore_dashboard(prestate), "dashboard_writes": 1}
+                    _operation_update(operation_id, "complete", "complete", message="Home schema prestate restored")
                 finally:
                     INSTALL_LOCK.release()
             elif path == "/api/review-dashboard":
