@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.11
+
+- Omit both unsupported immutable fields, `mode` and `url_path`, when updating or restoring an existing Home Assistant dashboard while preserving `mode: storage` on creation.
+- Bind the exact 10-inch Review Home C region to the approved one-parent C1-C8 grid and its ordinary single pencil editor through immutable Van Gogh `2.0.0-staging.7`.
+
 ## 1.1.10
 
 - Preserve `mode: storage` when creating a review dashboard while omitting the unsupported immutable `mode` field when refreshing or restoring an existing Home Assistant dashboard.

@@ -66,7 +66,7 @@ class Installer110ContractTests(unittest.TestCase):
             "product": "van-gogh2",
             "version": app.EXPECTED_RELEASE,
             "sha256": app.EXPECTED_RELEASE_SHA256,
-            "archive": "api/v1/van-gogh2/archive/van-gogh2-2.0.0-staging.6.tar.gz",
+            "archive": "api/v1/van-gogh2/archive/van-gogh2-2.0.0-staging.7.tar.gz",
             "supported_home_assistant": {"minimum": "2026.8.3", "tested": "2026.8.3"},
         }
 
@@ -110,7 +110,9 @@ class Installer110ContractTests(unittest.TestCase):
         self.assertEqual([row["url_path"] for row in state["rows"]], ["ellie-family", "van-gogh-c-grid-review"])
         mutating = [cmd for cmd in state["commands"] if cmd["type"] not in {"lovelace/dashboards/list", "lovelace/config"}]
         self.assertEqual([cmd["type"] for cmd in mutating], ["lovelace/dashboards/update", "lovelace/config/save"])
-        self.assertTrue(all(cmd.get("url_path") == "van-gogh-c-grid-review" for cmd in mutating))
+        update, save = mutating
+        self.assertNotIn("url_path", update)
+        self.assertEqual(save.get("url_path"), "van-gogh-c-grid-review")
 
     def test_review_dashboard_create_keeps_mode_but_existing_updates_omit_it(self):
         existing = {
@@ -130,7 +132,7 @@ class Installer110ContractTests(unittest.TestCase):
         })
         updates = [cmd for cmd in existing["commands"] if cmd["type"] == "lovelace/dashboards/update"]
         self.assertEqual(len(updates), 2)
-        self.assertTrue(all("mode" not in command for command in updates))
+        self.assertTrue(all("mode" not in command and "url_path" not in command for command in updates))
         self.assertEqual(existing["rows"][0]["mode"], "storage")
 
         missing = {"rows": [], "configs": {}}

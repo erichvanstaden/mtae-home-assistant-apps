@@ -568,7 +568,7 @@ class HAClient:
             if not before["exists"]:
                 connection.call({"type": "lovelace/dashboards/create", "url_path": url_path, "title": title, "icon": icon, "show_in_sidebar": True, "require_admin": False, "mode": "storage"})
             else:
-                connection.call({"type": "lovelace/dashboards/update", "dashboard_id": before["registry"]["id"], "url_path": url_path, "title": title, "icon": icon, "show_in_sidebar": True, "require_admin": False})
+                connection.call({"type": "lovelace/dashboards/update", "dashboard_id": before["registry"]["id"], "title": title, "icon": icon, "show_in_sidebar": True, "require_admin": False})
             connection.call({"type": "lovelace/config/save", "url_path": url_path, "config": config})
             saved = connection.call({"type": "lovelace/config", "url_path": url_path})
             rows = connection.call({"type": "lovelace/dashboards/list"})
@@ -596,7 +596,7 @@ class HAClient:
                 if not current.get("exists"):
                     connection.call({"type": "lovelace/dashboards/create", "url_path": url_path, "title": registry.get("title") or "Van Gogh review", "icon": registry.get("icon"), "show_in_sidebar": bool(registry.get("show_in_sidebar", True)), "require_admin": bool(registry.get("require_admin", False)), "mode": "storage"})
                 else:
-                    connection.call({"type": "lovelace/dashboards/update", "dashboard_id": current["registry"]["id"], "url_path": url_path, "title": registry.get("title") or "Van Gogh review", "icon": registry.get("icon"), "show_in_sidebar": bool(registry.get("show_in_sidebar", True)), "require_admin": bool(registry.get("require_admin", False))})
+                    connection.call({"type": "lovelace/dashboards/update", "dashboard_id": current["registry"]["id"], "title": registry.get("title") or "Van Gogh review", "icon": registry.get("icon"), "show_in_sidebar": bool(registry.get("show_in_sidebar", True)), "require_admin": bool(registry.get("require_admin", False))})
                 connection.call({"type": "lovelace/config/save", "url_path": url_path, "config": config})
         after = self.dashboard_snapshot(url_path)
         if bool(after.get("exists")) != bool(snapshot.get("exists")):
