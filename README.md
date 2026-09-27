@@ -19,7 +19,7 @@ This repository contains the **MTAE Van Gogh Installer** application shell. It d
 4. Install **MTAE Van Gogh Installer**.
 5. Start the app and open its Web UI.
 6. Enter the one-time MTAE Install Code supplied through the authorised MTAE channel, then select **Activate site**. The permanent HTTPS endpoint is built into the App.
-7. Select **Check release**, then **Install / update**. Installer 1.1.12 accepts only Van Gogh 2 `2.0.0-staging.7` with its pinned archive identity and Home Assistant `2026.8.3` compatibility record.
+7. Select **Check release**, then **Install / update**. Installer 1.1.13 accepts only Van Gogh 2 `2.0.0-staging.8` with its pinned archive identity and Home Assistant `2026.8.3` compatibility record.
 8. For an owner review, choose the approved private dashboard JSON in the Web UI and select **Create / refresh Family review**. This bounded action targets only the separate `van-gogh-c-grid-review` dashboard and records its own exact prestate restore.
 
 ## What the Installer does

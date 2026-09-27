@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.13
+
+- Pin the corrected immutable Van Gogh 2 `2.0.0-staging.8` package identity and archive checksum while preserving the Installer 1.1.12 transport, restart, resource, dashboard and rollback behaviour.
+
 ## 1.1.12
 
 - Bypass ambient HTTP proxy settings only for the validated private Home Assistant Core module readiness probe, preserving the existing release, restart, integration, resource and rollback paths.

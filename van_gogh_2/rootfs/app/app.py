@@ -24,8 +24,8 @@ OPERATION_LOCK = threading.Lock()
 DEFAULT_RELEASE_ENDPOINT = os.environ.get(
     "VAN_GOGH_RELEASE_ENDPOINT", "https://installer.mtae.com.au"
 ).rstrip("/")
-EXPECTED_RELEASE = "2.0.0-staging.7"
-EXPECTED_RELEASE_SHA256 = "4d954bf50c1d98f40d2f4e73996d0b6d79424bb3fa2040317e9dc275d03bed9f"
+EXPECTED_RELEASE = "2.0.0-staging.8"
+EXPECTED_RELEASE_SHA256 = "107df657855e84de49fd944eb70ad652b345d205100a9df5f8505581ddc5a0e9"
 EXPECTED_HOME_ASSISTANT = "2026.8.3"
 REVIEW_DASHBOARD_PATH = "van-gogh-c-grid-review"
 
@@ -117,11 +117,11 @@ def _atomic_private_json(path: Path, payload: dict[str, Any]) -> None:
 def _validate_release_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     supported = manifest.get("supported_home_assistant")
     if manifest.get("version") != EXPECTED_RELEASE:
-        raise InstallError(f"Installer 1.1.12 requires Van Gogh {EXPECTED_RELEASE}")
+        raise InstallError(f"Installer 1.1.13 requires Van Gogh {EXPECTED_RELEASE}")
     if manifest.get("sha256") != EXPECTED_RELEASE_SHA256:
-        raise InstallError("Van Gogh staging.7 archive identity did not match Installer 1.1.12")
+        raise InstallError("Van Gogh staging.8 archive identity did not match Installer 1.1.13")
     if not isinstance(supported, dict) or supported.get("minimum") != EXPECTED_HOME_ASSISTANT or supported.get("tested") != EXPECTED_HOME_ASSISTANT:
-        raise InstallError(f"Installer 1.1.12 requires Home Assistant {EXPECTED_HOME_ASSISTANT} release metadata")
+        raise InstallError(f"Installer 1.1.13 requires Home Assistant {EXPECTED_HOME_ASSISTANT} release metadata")
     return manifest
 
 
@@ -373,7 +373,7 @@ class Handler(BaseHTTPRequestHandler):
                         dashboard = ha.save_review_dashboard(
                             REVIEW_DASHBOARD_PATH,
                             _review_config(payload),
-                            title="Van Gogh Family staging.7 review",
+                            title="Van Gogh Family staging.8 review",
                         )
                     except Exception:
                         ha.restore_dashboard(prestate)
