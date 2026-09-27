@@ -535,6 +535,81 @@ class HAClient:
             result = connection.call({"type": "lovelace/resources"})
         return result if isinstance(result, list) else []
 
+    def dashboard_snapshot(self, url_path: str) -> dict[str, Any]:
+        """Capture one storage dashboard without reading or changing other dashboards."""
+        with self.websocket() as connection:
+            rows = connection.call({"type": "lovelace/dashboards/list"})
+            if not isinstance(rows, list):
+                raise HAError("Home Assistant returned an invalid dashboard list")
+            matches = [item for item in rows if item.get("url_path") == url_path]
+            if len(matches) > 1:
+                raise HAError("Home Assistant returned duplicate review dashboard rows")
+            if not matches:
+                return {"url_path": url_path, "exists": False}
+            config = connection.call({"type": "lovelace/config", "url_path": url_path})
+        if not isinstance(config, dict):
+            raise HAError("Home Assistant returned an invalid review dashboard config")
+        row = matches[0]
+        return {
+            "url_path": url_path,
+            "exists": True,
+            "registry": {key: row.get(key) for key in ("id", "url_path", "title", "icon", "show_in_sidebar", "require_admin", "mode")},
+            "config": config,
+        }
+
+    def save_review_dashboard(self, url_path: str, config: dict[str, Any], *, title: str, icon: str = "mdi:palette-outline") -> dict[str, Any]:
+        """Create or refresh one explicitly named review dashboard and verify exact readback."""
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", url_path):
+            raise HAError("Review dashboard path is invalid")
+        if not isinstance(config.get("views"), list) or not config["views"]:
+            raise HAError("Review dashboard config must contain at least one view")
+        before = self.dashboard_snapshot(url_path)
+        with self.websocket() as connection:
+            if not before["exists"]:
+                connection.call({"type": "lovelace/dashboards/create", "url_path": url_path, "title": title, "icon": icon, "show_in_sidebar": True, "require_admin": False, "mode": "storage"})
+            else:
+                connection.call({"type": "lovelace/dashboards/update", "dashboard_id": before["registry"]["id"], "url_path": url_path, "title": title, "icon": icon, "show_in_sidebar": True, "require_admin": False, "mode": "storage"})
+            connection.call({"type": "lovelace/config/save", "url_path": url_path, "config": config})
+            saved = connection.call({"type": "lovelace/config", "url_path": url_path})
+            rows = connection.call({"type": "lovelace/dashboards/list"})
+        matches = [item for item in rows if item.get("url_path") == url_path] if isinstance(rows, list) else []
+        if saved != config or len(matches) != 1 or matches[0].get("mode") != "storage":
+            raise HAError("Review dashboard exact save/readback verification failed")
+        return {"created": not before["exists"], "url_path": url_path, "registry": matches[0], "readback_verified": True}
+
+    def restore_dashboard(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+        """Restore the exact dashboard state captured by ``dashboard_snapshot``."""
+        url_path = str(snapshot.get("url_path") or "")
+        current = self.dashboard_snapshot(url_path)
+        with self.websocket() as connection:
+            if not snapshot.get("exists"):
+                if current.get("exists"):
+                    dashboard_id = (current.get("registry") or {}).get("id")
+                    if not dashboard_id:
+                        raise HAError("Review dashboard has no rollback identifier")
+                    connection.call({"type": "lovelace/dashboards/delete", "dashboard_id": dashboard_id})
+            else:
+                registry = snapshot.get("registry") or {}
+                config = snapshot.get("config")
+                if not isinstance(config, dict):
+                    raise HAError("Recorded review dashboard prestate is invalid")
+                if not current.get("exists"):
+                    connection.call({"type": "lovelace/dashboards/create", "url_path": url_path, "title": registry.get("title") or "Van Gogh review", "icon": registry.get("icon"), "show_in_sidebar": bool(registry.get("show_in_sidebar", True)), "require_admin": bool(registry.get("require_admin", False)), "mode": "storage"})
+                else:
+                    connection.call({"type": "lovelace/dashboards/update", "dashboard_id": current["registry"]["id"], "url_path": url_path, "title": registry.get("title") or "Van Gogh review", "icon": registry.get("icon"), "show_in_sidebar": bool(registry.get("show_in_sidebar", True)), "require_admin": bool(registry.get("require_admin", False)), "mode": "storage"})
+                connection.call({"type": "lovelace/config/save", "url_path": url_path, "config": config})
+        after = self.dashboard_snapshot(url_path)
+        if bool(after.get("exists")) != bool(snapshot.get("exists")):
+            raise HAError("Review dashboard rollback existence readback failed")
+        if snapshot.get("exists") and after.get("config") != snapshot.get("config"):
+            raise HAError("Review dashboard rollback config readback failed")
+        if snapshot.get("exists"):
+            expected_registry = snapshot.get("registry") or {}
+            for key in ("url_path", "title", "icon", "show_in_sidebar", "require_admin", "mode"):
+                if (after.get("registry") or {}).get(key) != expected_registry.get(key):
+                    raise HAError("Review dashboard rollback registry readback failed")
+        return {"url_path": url_path, "exists": bool(after.get("exists")), "readback_verified": True}
+
     def snapshot(self) -> dict[str, Any]:
         return {
             "entries": [

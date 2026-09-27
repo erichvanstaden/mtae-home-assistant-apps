@@ -19,6 +19,8 @@ This repository contains the **MTAE Van Gogh Installer** application shell. It d
 4. Install **MTAE Van Gogh Installer**.
 5. Start the app and open its Web UI.
 6. Enter the one-time MTAE Install Code supplied through the authorised MTAE channel, then select **Activate site**. The permanent HTTPS endpoint is built into the App.
+7. Select **Check release**, then **Install / update**. Installer 1.1.9 accepts only Van Gogh 2 `2.0.0-staging.6` with its pinned archive identity and Home Assistant `2026.8.3` compatibility record.
+8. For an owner review, choose the approved private dashboard JSON in the Web UI and select **Create / refresh Family review**. This bounded action targets only the separate `van-gogh-c-grid-review` dashboard and records its own exact prestate restore.
 
 ## What the Installer does
 
@@ -29,6 +31,7 @@ This repository contains the **MTAE Van Gogh Installer** application shell. It d
 - installs or updates `/config/custom_components/van_gogh2`;
 - reconciles the Van Gogh Lovelace module to exactly one resource;
 - restarts Home Assistant Core when required and verifies readiness;
+- creates or refreshes the separate Family review dashboard only when an approved private JSON file is supplied locally;
 - supports deterministic rollback to the recorded pre-install state.
 
 ## Security boundaries

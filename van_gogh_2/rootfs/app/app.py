@@ -18,11 +18,16 @@ DATA_ROOT = Path(os.environ.get("VAN_GOGH_DATA_ROOT", "/data"))
 CONFIG_ROOT = Path(os.environ.get("VAN_GOGH_CONFIG_ROOT", "/homeassistant"))
 SETTINGS = DATA_ROOT / "settings.json"
 OPERATION_RECEIPT = DATA_ROOT / "operation.json"
+REVIEW_DASHBOARD_PRESTATE = DATA_ROOT / "review-dashboard-prestate.json"
 INSTALL_LOCK = threading.Lock()
 OPERATION_LOCK = threading.Lock()
 DEFAULT_RELEASE_ENDPOINT = os.environ.get(
     "VAN_GOGH_RELEASE_ENDPOINT", "https://installer.mtae.com.au"
 ).rstrip("/")
+EXPECTED_RELEASE = "2.0.0-staging.6"
+EXPECTED_RELEASE_SHA256 = "913e1ea7ff82d0aab0fcbb9f2605dfe93adf26a216e4afa3c5d18f3536cdeec2"
+EXPECTED_HOME_ASSISTANT = "2026.8.3"
+REVIEW_DASHBOARD_PATH = "van-gogh-c-grid-review"
 
 
 def _load_operation_state() -> dict[str, Any]:
@@ -101,6 +106,34 @@ def _atomic_settings(payload: dict[str, str]) -> None:
     os.replace(temporary, SETTINGS)
 
 
+def _atomic_private_json(path: Path, payload: dict[str, Any]) -> None:
+    DATA_ROOT.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+
+
+def _validate_release_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
+    supported = manifest.get("supported_home_assistant")
+    if manifest.get("version") != EXPECTED_RELEASE:
+        raise InstallError(f"Installer 1.1.9 requires Van Gogh {EXPECTED_RELEASE}")
+    if manifest.get("sha256") != EXPECTED_RELEASE_SHA256:
+        raise InstallError("Van Gogh staging.6 archive identity did not match Installer 1.1.9")
+    if not isinstance(supported, dict) or supported.get("minimum") != EXPECTED_HOME_ASSISTANT or supported.get("tested") != EXPECTED_HOME_ASSISTANT:
+        raise InstallError(f"Installer 1.1.9 requires Home Assistant {EXPECTED_HOME_ASSISTANT} release metadata")
+    return manifest
+
+
+def _review_config(payload: dict[str, Any]) -> dict[str, Any]:
+    config = payload.get("config")
+    if not isinstance(config, dict):
+        raise InstallError("Review dashboard JSON must contain a config object")
+    if not isinstance(config.get("views"), list) or not config["views"]:
+        raise InstallError("Review dashboard config must contain at least one view")
+    return config
+
+
 def _settings() -> dict[str, str]:
     if not SETTINGS.is_file():
         return {}
@@ -137,6 +170,9 @@ def _status() -> dict[str, Any]:
         "restart_required": bool(receipt and receipt.get("restart_required")),
         "last_install": receipt,
         "operation": _operation_snapshot(),
+        "supported_release": EXPECTED_RELEASE,
+        "supported_home_assistant": EXPECTED_HOME_ASSISTANT,
+        "review_dashboard_path": REVIEW_DASHBOARD_PATH,
     }
 
 
@@ -185,8 +221,9 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError as error:
             raise InstallError("Invalid request length") from error
-        if length < 0 or length > 64 * 1024:
-            raise InstallError("Request body exceeds 64 KiB")
+        limit = 1024 * 1024 if self.path.split("?", 1)[0] == "/api/review-dashboard" else 64 * 1024
+        if length < 0 or length > limit:
+            raise InstallError(f"Request body exceeds {limit // 1024} KiB")
         try:
             payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -242,7 +279,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
             elif path == "/api/check":
                 operation_id = _operation_begin("release_check", "checking_release")
-                manifest = _release_client().latest()
+                manifest = _validate_release_manifest(_release_client().latest())
                 result = {"release": manifest, "credential_returned": False}
                 _operation_update(
                     operation_id,
@@ -256,7 +293,7 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     operation_id = _operation_begin("install", "checking_release")
                     client = _release_client()
-                    manifest = client.latest()
+                    manifest = _validate_release_manifest(client.latest())
                     module_url_for_release(manifest["version"])
                     manager = InstallManager(CONFIG_ROOT)
                     ha = HAClient.from_environment()
@@ -314,6 +351,52 @@ class Handler(BaseHTTPRequestHandler):
                             else "Installed; Home Assistant restart required"
                         ),
                     )
+                finally:
+                    INSTALL_LOCK.release()
+            elif path == "/api/review-dashboard":
+                if not INSTALL_LOCK.acquire(blocking=False):
+                    raise InstallError("Another installer operation is already running")
+                try:
+                    operation_id = _operation_begin("review_dashboard", "saving_review_dashboard")
+                    manager = InstallManager(CONFIG_ROOT)
+                    if manager.installed_version() != EXPECTED_RELEASE:
+                        raise InstallError(f"Install and verify Van Gogh {EXPECTED_RELEASE} before refreshing the review dashboard")
+                    ha = HAClient.from_environment()
+                    if ha is None:
+                        raise InstallError("Supervisor API token is unavailable")
+                    core = ha.wait_ready()
+                    if core.get("version") != EXPECTED_HOME_ASSISTANT:
+                        raise InstallError(f"Review dashboard refresh requires Home Assistant {EXPECTED_HOME_ASSISTANT}")
+                    prestate = ha.dashboard_snapshot(REVIEW_DASHBOARD_PATH)
+                    _atomic_private_json(REVIEW_DASHBOARD_PRESTATE, prestate)
+                    try:
+                        dashboard = ha.save_review_dashboard(
+                            REVIEW_DASHBOARD_PATH,
+                            _review_config(payload),
+                            title="Van Gogh Family staging.6 review",
+                        )
+                    except Exception:
+                        ha.restore_dashboard(prestate)
+                        raise
+                    result = {"review_dashboard": dashboard, "owner_route": f"/{REVIEW_DASHBOARD_PATH}/home"}
+                    _operation_update(operation_id, "complete", "complete", message="Family review dashboard refreshed and verified")
+                finally:
+                    INSTALL_LOCK.release()
+            elif path == "/api/review-dashboard/rollback":
+                if payload.get("confirm") != "rollback":
+                    raise InstallError("Review dashboard rollback requires confirm=rollback")
+                if not REVIEW_DASHBOARD_PRESTATE.is_file():
+                    raise InstallError("No review dashboard prestate is available")
+                if not INSTALL_LOCK.acquire(blocking=False):
+                    raise InstallError("Another installer operation is already running")
+                try:
+                    operation_id = _operation_begin("review_dashboard_rollback", "restoring_review_dashboard")
+                    ha = HAClient.from_environment()
+                    if ha is None:
+                        raise InstallError("Supervisor API token is unavailable")
+                    prestate = json.loads(REVIEW_DASHBOARD_PRESTATE.read_text(encoding="utf-8"))
+                    result = {"review_dashboard": ha.restore_dashboard(prestate)}
+                    _operation_update(operation_id, "complete", "complete", message="Family review dashboard restored")
                 finally:
                     INSTALL_LOCK.release()
             elif path == "/api/rollback":

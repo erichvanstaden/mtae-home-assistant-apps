@@ -65,6 +65,12 @@
     <div class="actions"><button id="installButton" onclick="installRelease()">Install / update</button><button class="danger" onclick="rollback()">Roll back</button><button class="secondary" onclick="restartHA()">Restart Home Assistant</button></div>
     <div class="marks"><img src="static/mtae-installer.png" alt="MTAE installer icon"><span>MTAE owner-approved artwork</span></div>
   </section>
+  <section>
+    <h2>Family review dashboard</h2>
+    <p>After staging.6 is installed, choose the approved private dashboard JSON to create or refresh only the separate Family review dashboard. The file is sent to this local Installer and is not published.</p>
+    <label for="reviewFile">Approved dashboard JSON</label><input id="reviewFile" type="file" accept="application/json,.json">
+    <div class="actions"><button onclick="refreshReviewDashboard()">Create / refresh Family review</button><button class="danger" onclick="rollbackReviewDashboard()">Restore review prestate</button></div>
+  </section>
 </main>
 <script>
 const output = document.getElementById('output');
@@ -84,6 +90,7 @@ const stageLabels = {
   verifying_readiness:'Verifying integration and frontend readiness',
   automatic_rollback:'Readiness failed — restoring the pre-install state',
   restoring_files:'Restoring protected files', restoring_home_assistant:'Restoring Home Assistant state',
+  saving_review_dashboard:'Saving and verifying the Family review dashboard', restoring_review_dashboard:'Restoring the Family review dashboard',
   activated:'Activation complete', complete:'Operation complete', restart_pending:'Restart remains pending', failed:'Failed safely'
 };
 function updateButtons(){
@@ -158,6 +165,14 @@ async function checkRelease(){ await api('api/check',{},'checking_release'); ses
 async function installRelease(){ if(confirm('Install or update Van Gogh 2 from the verified private release, then restart Home Assistant Core to finish setup?')) await api('api/install',{},'checking_release'); }
 async function rollback(){ if(confirm('Restore the exact state from before the last successful install?')) await api('api/rollback',{confirm:'rollback'},'restoring_files'); }
 async function restartHA(){ if(confirm('Restart Home Assistant now and verify a complete stop/start cycle?')) await api('api/restart',{confirm:'restart'},'requesting_restart'); }
+async function refreshReviewDashboard(){
+  const file=document.getElementById('reviewFile').files[0];
+  if(!file){ output.textContent='Choose the approved dashboard JSON first.'; return; }
+  const source=JSON.parse(await file.text());
+  const config=source?.data?.config || source?.config || source;
+  if(confirm('Create or refresh only the separate Family review dashboard from this approved file?')) await api('api/review-dashboard',{config},'saving_review_dashboard');
+}
+async function rollbackReviewDashboard(){ if(confirm('Restore the Family review dashboard to its exact pre-refresh state?')) await api('api/review-dashboard/rollback',{confirm:'rollback'},'restoring_review_dashboard'); }
 refresh(true).catch(error => { output.textContent=`Error: ${error.message}`; renderOperation({state:'error',stage:'failed'}); });
 setInterval(() => refresh(false).catch(() => {}), 1000);
 </script>

@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.9
+
+- Bind installation to the immutable Van Gogh 2 `2.0.0-staging.6` archive and Home Assistant `2026.8.3` compatibility record.
+- Add a supported, bounded ingress action to create or refresh only the separate Family review dashboard from an approved private JSON file, with exact readback, automatic failure recovery and explicit prestate restore.
+
 ## 1.1.8
 
 - Publish the Installer refresh for the immutable Van Gogh 2 `2.0.0-staging.4` private release while preserving the existing activation, checksum, installation, readiness and rollback logic.
