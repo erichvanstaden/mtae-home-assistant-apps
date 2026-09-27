@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.12
+
+- Bypass ambient HTTP proxy settings only for the validated private Home Assistant Core module readiness probe, preserving the existing release, restart, integration, resource and rollback paths.
+
 ## 1.1.11
 
 - Omit both unsupported immutable fields, `mode` and `url_path`, when updating or restoring an existing Home Assistant dashboard while preserving `mode: storage` on creation.

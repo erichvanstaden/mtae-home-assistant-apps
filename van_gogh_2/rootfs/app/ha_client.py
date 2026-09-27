@@ -676,13 +676,14 @@ class HAClient:
         poll_interval: float = 2.0,
     ) -> dict[str, Any]:
         request = urllib.request.Request(f"{self.core_asset_origin()}{module_url}")
+        direct_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         wait_seconds = max(0.0, min(timeout, 60.0))
         deadline = time.monotonic() + wait_seconds
         last_failure = "transient request failure"
         while True:
             request_timeout = min(20.0, max(0.001, deadline - time.monotonic()))
             try:
-                with urllib.request.urlopen(request, timeout=request_timeout) as response:
+                with direct_opener.open(request, timeout=request_timeout) as response:
                     sample = response.read(512)
                     status = response.status
             except urllib.error.HTTPError as error:

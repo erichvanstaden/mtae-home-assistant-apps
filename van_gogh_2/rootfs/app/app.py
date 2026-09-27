@@ -117,11 +117,11 @@ def _atomic_private_json(path: Path, payload: dict[str, Any]) -> None:
 def _validate_release_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     supported = manifest.get("supported_home_assistant")
     if manifest.get("version") != EXPECTED_RELEASE:
-        raise InstallError(f"Installer 1.1.11 requires Van Gogh {EXPECTED_RELEASE}")
+        raise InstallError(f"Installer 1.1.12 requires Van Gogh {EXPECTED_RELEASE}")
     if manifest.get("sha256") != EXPECTED_RELEASE_SHA256:
-        raise InstallError("Van Gogh staging.7 archive identity did not match Installer 1.1.11")
+        raise InstallError("Van Gogh staging.7 archive identity did not match Installer 1.1.12")
     if not isinstance(supported, dict) or supported.get("minimum") != EXPECTED_HOME_ASSISTANT or supported.get("tested") != EXPECTED_HOME_ASSISTANT:
-        raise InstallError(f"Installer 1.1.11 requires Home Assistant {EXPECTED_HOME_ASSISTANT} release metadata")
+        raise InstallError(f"Installer 1.1.12 requires Home Assistant {EXPECTED_HOME_ASSISTANT} release metadata")
     return manifest
 
 
