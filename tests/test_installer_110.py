@@ -51,7 +51,8 @@ class FakeConnection:
         if kind == "lovelace/dashboards/update":
             row = next(row for row in self.state["rows"] if row["id"] == message["dashboard_id"])
             for key in ("url_path", "title", "icon", "show_in_sidebar", "require_admin", "mode"):
-                row[key] = message[key]
+                if key in message:
+                    row[key] = message[key]
             return None
         if kind == "lovelace/dashboards/delete":
             self.state["rows"] = [row for row in self.state["rows"] if row["id"] != message["dashboard_id"]]
@@ -59,7 +60,7 @@ class FakeConnection:
         raise AssertionError(f"unexpected command {message}")
 
 
-class Installer119ContractTests(unittest.TestCase):
+class Installer110ContractTests(unittest.TestCase):
     def manifest(self):
         return {
             "product": "van-gogh2",
@@ -110,6 +111,34 @@ class Installer119ContractTests(unittest.TestCase):
         mutating = [cmd for cmd in state["commands"] if cmd["type"] not in {"lovelace/dashboards/list", "lovelace/config"}]
         self.assertEqual([cmd["type"] for cmd in mutating], ["lovelace/dashboards/update", "lovelace/config/save"])
         self.assertTrue(all(cmd.get("url_path") == "van-gogh-c-grid-review" for cmd in mutating))
+
+    def test_review_dashboard_create_keeps_mode_but_existing_updates_omit_it(self):
+        existing = {
+            "rows": [
+                {"id": "review-id", "url_path": "van-gogh-c-grid-review", "title": "Review", "mode": "storage"},
+            ],
+            "configs": {"van-gogh-c-grid-review": {"views": [{}]}},
+        }
+        client = HAClient(token="test")
+        client.websocket = lambda: FakeConnection(existing)
+        client.save_review_dashboard("van-gogh-c-grid-review", {"views": [{"title": "accepted"}]}, title="Review")
+        client.restore_dashboard({
+            "url_path": "van-gogh-c-grid-review",
+            "exists": True,
+            "registry": dict(existing["rows"][0]),
+            "config": {"views": [{"title": "accepted"}]},
+        })
+        updates = [cmd for cmd in existing["commands"] if cmd["type"] == "lovelace/dashboards/update"]
+        self.assertEqual(len(updates), 2)
+        self.assertTrue(all("mode" not in command for command in updates))
+        self.assertEqual(existing["rows"][0]["mode"], "storage")
+
+        missing = {"rows": [], "configs": {}}
+        client.websocket = lambda: FakeConnection(missing)
+        client.save_review_dashboard("new-review", {"views": [{}]}, title="Review")
+        creates = [cmd for cmd in missing["commands"] if cmd["type"] == "lovelace/dashboards/create"]
+        self.assertEqual(len(creates), 1)
+        self.assertEqual(creates[0]["mode"], "storage")
 
     def test_review_rollback_deletes_only_new_review_dashboard(self):
         state = {

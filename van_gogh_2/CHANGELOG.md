@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.10
+
+- Preserve `mode: storage` when creating a review dashboard while omitting the unsupported immutable `mode` field when refreshing or restoring an existing Home Assistant dashboard.
+
 ## 1.1.9
 
 - Bind installation to the immutable Van Gogh 2 `2.0.0-staging.6` archive and Home Assistant `2026.8.3` compatibility record.
