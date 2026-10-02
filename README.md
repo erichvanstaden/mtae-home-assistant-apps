@@ -19,7 +19,7 @@ This repository contains the **MTAE Van Gogh Installer** application shell. It d
 4. Install **MTAE Van Gogh Installer**.
 5. Start the app and open its Web UI.
 6. Enter the one-time MTAE Install Code supplied through the authorised MTAE channel, then select **Activate site**. The permanent HTTPS endpoint is built into the App.
-7. Select **Check release**, then **Install / update**. Installer 1.1.14 accepts only Van Gogh 2 `2.0.0-staging.8` with its pinned archive identity and Home Assistant `2026.8.3` compatibility record.
+7. Select **Check release**, then **Install / update**. Installer 1.1.16 accepts only private candidate Van Gogh 2 `2.0.0-staging.10` with its pinned archive identity and exact Home Assistant `2026.8.3` compatibility record. The first clean install creates the supported `/van-gogh-builder/builder` entry without overwriting an existing owner dashboard.
 8. On supported Home Assistant `2026.9.3` systems, select **Migrate Home C-grid** to upgrade a structurally recognised legacy four-C-bay Van Gogh Home dashboard. The target is discovered from product schema markers, not customer or route identity.
 9. For an owner review, choose the approved private dashboard JSON in the Web UI and select **Create / refresh Family review**. This bounded action targets only the separate `van-gogh-c-grid-review` dashboard and records its own exact prestate restore.
 

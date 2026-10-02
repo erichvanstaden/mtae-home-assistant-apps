@@ -27,8 +27,8 @@ OPERATION_LOCK = threading.Lock()
 DEFAULT_RELEASE_ENDPOINT = os.environ.get(
     "VAN_GOGH_RELEASE_ENDPOINT", "https://installer.mtae.com.au"
 ).rstrip("/")
-EXPECTED_RELEASE = "2.0.0-staging.8"
-EXPECTED_RELEASE_SHA256 = "107df657855e84de49fd944eb70ad652b345d205100a9df5f8505581ddc5a0e9"
+EXPECTED_RELEASE = "2.0.0-staging.10"
+EXPECTED_RELEASE_SHA256 = "b86ffe4cb6f5fae82b16faedbb2e1f2ce2ca3b4c617c29e237b42f1c0063c626"
 EXPECTED_HOME_ASSISTANT = "2026.8.3"
 MIGRATION_HOME_ASSISTANT = "2026.9.3"
 REVIEW_DASHBOARD_PATH = "van-gogh-c-grid-review"
@@ -121,11 +121,11 @@ def _atomic_private_json(path: Path, payload: dict[str, Any]) -> None:
 def _validate_release_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     supported = manifest.get("supported_home_assistant")
     if manifest.get("version") != EXPECTED_RELEASE:
-        raise InstallError(f"Installer 1.1.14 requires Van Gogh {EXPECTED_RELEASE}")
+        raise InstallError(f"Installer 1.1.16 requires Van Gogh {EXPECTED_RELEASE}")
     if manifest.get("sha256") != EXPECTED_RELEASE_SHA256:
-        raise InstallError("Van Gogh staging.8 archive identity did not match Installer 1.1.14")
+        raise InstallError("Van Gogh staging.10 archive identity did not match Installer 1.1.16")
     if not isinstance(supported, dict) or supported.get("minimum") != EXPECTED_HOME_ASSISTANT or supported.get("tested") != EXPECTED_HOME_ASSISTANT:
-        raise InstallError(f"Installer 1.1.14 requires Home Assistant {EXPECTED_HOME_ASSISTANT} release metadata")
+        raise InstallError(f"Installer 1.1.16 requires Home Assistant {EXPECTED_HOME_ASSISTANT} release metadata")
     return manifest
 
 

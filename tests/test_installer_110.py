@@ -126,8 +126,11 @@ class Installer110ContractTests(unittest.TestCase):
             "product": "van-gogh2",
             "version": app.EXPECTED_RELEASE,
             "sha256": app.EXPECTED_RELEASE_SHA256,
-            "archive": "api/v1/van-gogh2/archive/van-gogh2-2.0.0-staging.8.tar.gz",
-            "supported_home_assistant": {"minimum": "2026.8.3", "tested": "2026.8.3"},
+            "archive": "api/v1/van-gogh2/archive/van-gogh2-2.0.0-staging.10.tar.gz",
+            "supported_home_assistant": {
+                "minimum": app.EXPECTED_HOME_ASSISTANT,
+                "tested": app.EXPECTED_HOME_ASSISTANT,
+            },
         }
 
     def test_exact_release_manifest_is_accepted(self):

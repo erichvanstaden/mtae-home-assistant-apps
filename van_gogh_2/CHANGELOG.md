@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.1.16
+
+- Pin corrected private candidate `2.0.0-staging.10`, which adds the requested Builder card registration after clean-HA browser proof exposed the staging.9 mismatch.
+- Preserve Installer 1.1.15 behaviour and Home Assistant `2026.8.3` support; no publication or live mutation.
+
+## 1.1.15
+
+- Pin private candidate `2.0.0-staging.9` and preserve the Home Assistant `2026.8.3` support contract.
+- Create a supported `van-gogh-builder` storage-dashboard entry on first install without overwriting an existing owner dashboard.
+- Include that Builder dashboard in install prestate and exact rollback.
+
 ## 1.1.14
 
 - Add a generic, idempotent Van Gogh Home product-schema migration from the recognised four legacy C-bays to the approved one-parent C1-C8 grid.
