@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.17
+
+- Fix forward from immutable `v1.1.16` by including the reviewed Builder-entry `ha_client.py` change and its regression test; `v1.1.16` is preserved and not rewritten.
+- Keep private package `2.0.0-staging.10`, its pinned archive identity and Home Assistant `2026.8.3` support unchanged.
+
 ## 1.1.16
 
 - Pin corrected private candidate `2.0.0-staging.10`, which adds the requested Builder card registration after clean-HA browser proof exposed the staging.9 mismatch.
