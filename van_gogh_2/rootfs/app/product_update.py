@@ -778,10 +778,15 @@ class ProductUpdateManager:
         if not isinstance(dashboard_path, str) or not dashboard_path:
             raise ProductUpdateError("Product-update receipt has no dashboard path")
         foundation_plan = self._foundation_rollback_plan(receipt)
-        self.installer.rollback_preflight()
         foundation_stages = self._stage_foundation_rollback(foundation_plan)
+        try:
+            component_transaction = self.installer.stage_rollback()
+        except Exception:
+            self._discard_foundation_stages(foundation_stages)
+            raise
         current_dashboard = self.ha.dashboard_snapshot(dashboard_path)
         try:
+            self.installer.apply_staged_rollback(component_transaction)
             dashboard = self.ha.restore_dashboard(snapshot)
             foundation_restored = self._restore_foundation_files(
                 receipt,
@@ -790,14 +795,21 @@ class ProductUpdateManager:
             )
         except Exception:
             self._discard_foundation_stages(foundation_stages)
+            recovery_error: Exception | None = None
             try:
                 self.ha.restore_dashboard(current_dashboard)
-            except Exception as recovery_error:
+            except Exception as caught:
+                recovery_error = caught
+            try:
+                self.installer.discard_staged_rollback(component_transaction)
+            except Exception as caught:
+                recovery_error = recovery_error or caught
+            if recovery_error is not None:
                 raise ProductUpdateError(
-                    "Product rollback failed and dashboard current-state recovery failed"
+                    "Product rollback failed and current-state recovery failed"
                 ) from recovery_error
             raise
-        files = self.installer.rollback()
+        files = self.installer.commit_staged_rollback(component_transaction)
         return {
             "operation": "product_rollback",
             "dashboard": dashboard,

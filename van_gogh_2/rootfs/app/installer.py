@@ -385,41 +385,105 @@ class InstallManager:
             raise InstallError("Rollback integration backup is missing")
         return current, backup_id, backup_receipt, source
 
-    def rollback(self) -> dict[str, Any]:
-        _current, backup_id, backup_receipt, source = self.rollback_preflight()
+    def stage_rollback(self) -> dict[str, Any]:
+        """Stage the predecessor component without changing the installed component."""
+        current, backup_id, backup_receipt, source = self.rollback_preflight()
         previous_present = backup_receipt["previous_present"]
 
         self.target.parent.mkdir(parents=True, exist_ok=True)
         stage = self.target.parent / f".{COMPONENT}.rollback.{uuid.uuid4().hex}"
         displaced = self.target.parent / f".{COMPONENT}.before-rollback.{uuid.uuid4().hex}"
-        if previous_present:
-            shutil.copytree(source, stage)
-        moved_current = False
+        try:
+            if previous_present:
+                shutil.copytree(source, stage)
+        except Exception:
+            shutil.rmtree(stage, ignore_errors=True)
+            raise
+
+        return {
+            "current": current,
+            "backup_id": backup_id,
+            "backup_receipt": backup_receipt,
+            "stage": stage,
+            "displaced": displaced,
+            "moved_current": False,
+            "installed_previous": False,
+            "applied": False,
+            "committed": False,
+        }
+
+    def apply_staged_rollback(self, transaction: dict[str, Any]) -> None:
+        """Swap a staged predecessor into place while retaining current-state recovery."""
+        previous_present = transaction["backup_receipt"]["previous_present"]
+        stage = transaction["stage"]
+        displaced = transaction["displaced"]
         try:
             if self.target.exists():
                 os.replace(self.target, displaced)
-                moved_current = True
+                transaction["moved_current"] = True
             if previous_present:
                 os.replace(stage, self.target)
+                transaction["installed_previous"] = True
+            transaction["applied"] = True
         except Exception:
-            if self.target.exists():
-                shutil.rmtree(self.target, ignore_errors=True)
-            if moved_current and displaced.exists():
-                os.replace(displaced, self.target)
-            shutil.rmtree(stage, ignore_errors=True)
+            self.recover_staged_rollback(transaction)
             raise
+
+    def recover_staged_rollback(self, transaction: dict[str, Any]) -> None:
+        """Restore the exact component state retained by a staged rollback."""
+        stage = transaction["stage"]
+        displaced = transaction["displaced"]
+        if transaction["installed_previous"] and self.target.exists():
+            shutil.rmtree(self.target, ignore_errors=True)
+        if transaction["moved_current"] and displaced.exists():
+            os.replace(displaced, self.target)
+        shutil.rmtree(stage, ignore_errors=True)
         shutil.rmtree(displaced, ignore_errors=True)
+        transaction["moved_current"] = False
+        transaction["installed_previous"] = False
+        transaction["applied"] = False
+
+    def discard_staged_rollback(self, transaction: dict[str, Any]) -> None:
+        """Discard an unapplied stage, or recover it first if it was applied."""
+        if transaction["applied"] or transaction["moved_current"]:
+            self.recover_staged_rollback(transaction)
+            return
+        shutil.rmtree(transaction["stage"], ignore_errors=True)
+        shutil.rmtree(transaction["displaced"], ignore_errors=True)
+
+    def commit_staged_rollback(self, transaction: dict[str, Any]) -> dict[str, Any]:
+        """Commit rollback metadata only after the product transaction succeeds."""
+        backup_id = transaction["backup_id"]
+        backup_receipt = transaction["backup_receipt"]
 
         now = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         receipt = {
             "operation": "rollback",
             "rolled_back_backup_id": backup_id,
             "completed_utc": now,
-            "restored_present": previous_present,
+            "restored_present": backup_receipt["previous_present"],
             "restored_version": backup_receipt.get("previous_version"),
             "restart_required": True,
             "target": str(self.target),
         }
-        _write_json_atomic(self.operations / f"{now}-rollback.json", receipt)
-        self.current_receipt.unlink(missing_ok=True)
+        operation_receipt = self.operations / f"{now}-rollback.json"
+        try:
+            _write_json_atomic(operation_receipt, receipt)
+            self.current_receipt.unlink()
+        except Exception:
+            operation_receipt.unlink(missing_ok=True)
+            raise
+        shutil.rmtree(transaction["displaced"], ignore_errors=True)
+        shutil.rmtree(transaction["stage"], ignore_errors=True)
+        transaction["committed"] = True
         return receipt
+
+    def rollback(self) -> dict[str, Any]:
+        transaction = self.stage_rollback()
+        try:
+            self.apply_staged_rollback(transaction)
+            return self.commit_staged_rollback(transaction)
+        except Exception:
+            if not transaction["committed"]:
+                self.discard_staged_rollback(transaction)
+            raise
