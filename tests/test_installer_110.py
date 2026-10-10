@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
 import unittest
-from copy import deepcopy
 from pathlib import Path
-from unittest.mock import patch
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "van_gogh_2" / "rootfs" / "app"
@@ -15,66 +15,9 @@ os.environ.setdefault("VAN_GOGH_DATA_ROOT", tempfile.mkdtemp(prefix="vg-test-dat
 os.environ.setdefault("VAN_GOGH_CONFIG_ROOT", tempfile.mkdtemp(prefix="vg-test-config-"))
 
 import app  # noqa: E402
-from ha_client import HAClient, HADashboardWriteError, HAError  # noqa: E402
+import installer  # noqa: E402  # pyright: ignore[reportMissingImports]
+from ha_client import HAClient, HAError  # noqa: E402
 from installer import InstallError  # noqa: E402
-
-
-def migration_snapshot(path: str = "client-selected-path") -> dict:
-    config = {
-        "views": [{
-            "type": "custom:van-gogh-wall10-view",
-            "path": "local-home",
-            "cards": [
-                {"type": "custom:van-gogh2-home-header-card", "schema_version": 1},
-                {"type": "custom:van-gogh2-home-climate-card", "schema_version": 1, "entity": "climate.local"},
-                *[
-                    {"type": "custom:van-gogh-c-bay-card", "schema_version": 1, "bay": bay, "mode": "empty", "cards": []}
-                    for bay in ("C1-C2", "C3-C4", "C5-C6", "C7-C8")
-                ],
-                {"type": "custom:van-gogh2-quick-actions-card", "schema_version": 1, "actions": []},
-                {"type": "custom:van-gogh2-navigation-card", "schema_version": 1, "routes": [{"path": "/local/home"}]},
-            ],
-        }],
-    }
-    return {
-        "registry": {"id": "local-id", "url_path": path, "title": "Local", "mode": "storage"},
-        "config": config,
-    }
-
-
-class FakeManager:
-    def __init__(self, *_args, **_kwargs):
-        pass
-
-    def installed_version(self):
-        return app.EXPECTED_RELEASE
-
-
-class FakeMigrationHA:
-    def __init__(self, snapshot: dict, *, write_error: bool = False):
-        self.before = deepcopy(snapshot)
-        self.current = deepcopy(snapshot)
-        self.write_error = write_error
-        self.save_calls = 0
-        self.restore_calls = 0
-
-    def wait_ready(self):
-        return {"version": app.MIGRATION_HOME_ASSISTANT}
-
-    def storage_dashboard_inventory(self):
-        return [deepcopy(self.current)]
-
-    def save_existing_dashboard(self, url_path, expected, candidate):
-        self.save_calls += 1
-        self.current["config"] = deepcopy(candidate)
-        if self.write_error:
-            raise HADashboardWriteError("simulated unverified write")
-        return {"url_path": url_path, "readback_verified": True, "dashboard_writes": 1}
-
-    def restore_dashboard(self, snapshot):
-        self.restore_calls += 1
-        self.current = {"registry": deepcopy(snapshot["registry"]), "config": deepcopy(snapshot["config"])}
-        return {"readback_verified": True}
 
 
 class FakeConnection:
@@ -120,44 +63,71 @@ class FakeConnection:
         raise AssertionError(f"unexpected command {message}")
 
 
+class FakeHTTPResponse:
+    status = 200
+
+    def __init__(self, payload: dict):
+        self.payload = json.dumps(payload).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return None
+
+    def read(self, _limit: int):
+        return self.payload
+
+
 class Installer110ContractTests(unittest.TestCase):
     def manifest(self):
         return {
             "product": "van-gogh2",
-            "version": app.EXPECTED_RELEASE,
-            "sha256": app.EXPECTED_RELEASE_SHA256,
-            "archive": "api/v1/van-gogh2/archive/van-gogh2-2.0.0-staging.10.tar.gz",
-            "supported_home_assistant": {
-                "minimum": app.EXPECTED_HOME_ASSISTANT,
-                "tested": app.EXPECTED_HOME_ASSISTANT,
-            },
+            "version": "2.0.0-staging.8",
+            "component_version": "2.0.0-staging.8",
+            "foundation_version": "1.5.0",
+            "package_version": "1.0.0-rc.3",
+            "package_schema": app.PRODUCT_PACKAGE_SCHEMA,
+            "sha256": "a" * 64,
         }
 
-    def test_exact_release_manifest_is_accepted(self):
+    def test_product_release_manifest_is_accepted(self):
         manifest = self.manifest()
-        self.assertIs(app._validate_release_manifest(manifest), manifest)
+        self.assertIs(app._validate_product_release_manifest(manifest), manifest)
 
-    def test_wrong_release_hash_or_ha_is_rejected(self):
-        for key, value in (("version", "2.0.0-staging.5"), ("sha256", "0" * 64)):
+    def test_release_lookup_preserves_product_package_identity(self):
+        manifest = {
+            **self.manifest(),
+            "archive": "/private/product-package.tar.gz",
+            "supported_home_assistant": {"minimum": "2026.8.3", "maximum_exclusive": "2027.0.0"},
+        }
+        with mock.patch.object(installer, "_urlopen", return_value=FakeHTTPResponse(manifest)):
+            result = installer.ReleaseClient("https://example.invalid", "site-credential").latest()
+        for key in ("package_version", "component_version", "foundation_version", "package_schema"):
+            self.assertEqual(result[key], manifest[key])
+
+    def test_ha_client_exposes_product_dashboard_writer_not_legacy_builder_bootstrap(self):
+        self.assertTrue(callable(getattr(HAClient, "save_dashboard", None)))
+        self.assertFalse(hasattr(HAClient, "ensure_builder_dashboard"))
+
+    def test_wrong_product_identity_or_digest_is_rejected(self):
+        for key, value in (
+            ("product", "not-van-gogh"),
+            ("package_schema", "unsupported"),
+            ("package_version", None),
+            ("foundation_version", None),
+            ("component_version", "2.0.0-staging.7"),
+            ("sha256", "z" * 64),
+        ):
             manifest = self.manifest()
             manifest[key] = value
             with self.assertRaises(InstallError):
-                app._validate_release_manifest(manifest)
-        manifest = self.manifest()
-        manifest["supported_home_assistant"]["tested"] = "2026.8.4"
-        with self.assertRaises(InstallError):
-            app._validate_release_manifest(manifest)
-
-    def test_review_payload_requires_nonempty_views(self):
-        self.assertEqual(app._review_config({"config": {"views": [{}]}}), {"views": [{}]})
-        for payload in ({}, {"config": []}, {"config": {"views": []}}):
-            with self.assertRaises(InstallError):
-                app._review_config(payload)
+                app._validate_product_release_manifest(manifest)
 
     def test_review_refresh_changes_only_exact_review_path(self):
         state = {
             "rows": [
-                {"id": "family-id", "url_path": "ellie-family", "title": "Family", "mode": "storage"},
+                {"id": "family-id", "url_path": "unrelated-family", "title": "Family", "mode": "storage"},
                 {"id": "review-id", "url_path": "van-gogh-c-grid-review", "title": "Review", "mode": "storage"},
             ],
             "configs": {
@@ -170,7 +140,7 @@ class Installer110ContractTests(unittest.TestCase):
         result = client.save_review_dashboard("van-gogh-c-grid-review", candidate, title="Review")
         self.assertTrue(result["readback_verified"])
         self.assertEqual(state["configs"]["van-gogh-c-grid-review"], candidate)
-        self.assertEqual([row["url_path"] for row in state["rows"]], ["ellie-family", "van-gogh-c-grid-review"])
+        self.assertEqual([row["url_path"] for row in state["rows"]], ["unrelated-family", "van-gogh-c-grid-review"])
         mutating = [cmd for cmd in state["commands"] if cmd["type"] not in {"lovelace/dashboards/list", "lovelace/config"}]
         self.assertEqual([cmd["type"] for cmd in mutating], ["lovelace/dashboards/update", "lovelace/config/save"])
         update, save = mutating
@@ -208,7 +178,7 @@ class Installer110ContractTests(unittest.TestCase):
     def test_review_rollback_deletes_only_new_review_dashboard(self):
         state = {
             "rows": [
-                {"id": "family-id", "url_path": "ellie-family", "title": "Family", "mode": "storage"},
+                {"id": "family-id", "url_path": "unrelated-family", "title": "Family", "mode": "storage"},
                 {"id": "review-id", "url_path": "van-gogh-c-grid-review", "title": "Review", "mode": "storage"},
             ],
             "configs": {"van-gogh-c-grid-review": {"views": [{}]}},
@@ -217,53 +187,14 @@ class Installer110ContractTests(unittest.TestCase):
         client.websocket = lambda: FakeConnection(state)
         result = client.restore_dashboard({"url_path": "van-gogh-c-grid-review", "exists": False})
         self.assertTrue(result["readback_verified"])
-        self.assertEqual([row["url_path"] for row in state["rows"]], ["ellie-family"])
+        self.assertEqual([row["url_path"] for row in state["rows"]], ["unrelated-family"])
         deletes = [cmd for cmd in state["commands"] if cmd["type"] == "lovelace/dashboards/delete"]
         self.assertEqual(deletes, [{"type": "lovelace/dashboards/delete", "dashboard_id": "review-id"}])
 
     def test_invalid_dashboard_path_fails_closed(self):
         client = HAClient(token="test")
         with self.assertRaises(HAError):
-            client.save_review_dashboard("../ellie-family", {"views": [{}]}, title="Review")
-
-    def test_generic_home_migration_saves_and_verifies_one_discovered_dashboard(self):
-        fake = FakeMigrationHA(migration_snapshot())
-        with tempfile.TemporaryDirectory() as temporary, \
-             patch.object(app, "InstallManager", FakeManager), \
-             patch.object(app.HAClient, "from_environment", return_value=fake), \
-             patch.object(app, "HOME_MIGRATION_PRESTATE", Path(temporary) / "prestate.json"):
-            result = app._home_c_grid_migration()
-        self.assertTrue(result["migrated"])
-        self.assertEqual(result["dashboard_path"], "client-selected-path")
-        self.assertEqual(fake.save_calls, 1)
-        self.assertEqual(fake.restore_calls, 0)
-
-    def test_generic_home_migration_automatically_restores_an_unverified_write(self):
-        original = migration_snapshot()
-        fake = FakeMigrationHA(original, write_error=True)
-        with tempfile.TemporaryDirectory() as temporary, \
-             patch.object(app, "InstallManager", FakeManager), \
-             patch.object(app.HAClient, "from_environment", return_value=fake), \
-             patch.object(app, "HOME_MIGRATION_PRESTATE", Path(temporary) / "prestate.json"):
-            with self.assertRaises(HADashboardWriteError):
-                app._home_c_grid_migration()
-        self.assertEqual(fake.save_calls, 1)
-        self.assertEqual(fake.restore_calls, 1)
-        self.assertEqual(fake.current["config"], original["config"])
-
-    def test_generic_home_migration_unsupported_schema_has_zero_dashboard_writes(self):
-        unsupported = migration_snapshot()
-        unsupported["config"]["views"][0]["cards"][2]["bay"] = "unsupported"
-        fake = FakeMigrationHA(unsupported)
-        with tempfile.TemporaryDirectory() as temporary, \
-             patch.object(app, "InstallManager", FakeManager), \
-             patch.object(app.HAClient, "from_environment", return_value=fake), \
-             patch.object(app, "HOME_MIGRATION_PRESTATE", Path(temporary) / "prestate.json"):
-            with self.assertRaises(InstallError):
-                app._home_c_grid_migration()
-        self.assertEqual(fake.save_calls, 0)
-        self.assertEqual(fake.restore_calls, 0)
-
+            client.save_review_dashboard("../unrelated-family", {"views": [{}]}, title="Review")
 
 if __name__ == "__main__":
     unittest.main()

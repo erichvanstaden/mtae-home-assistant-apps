@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.0
+
+- Install the site-neutral private product package `1.0.0-builder.23-p0.3`, carrying accepted component `2.0.0-builder.23-p0.3`, through the validated local site-manifest contract.
+- Preserve the public `van_gogh_2` App namespace, protected `/data` activation/settings state, local site-manifest bytes, site bindings and unrelated Home Assistant surfaces across clean install and in-place App upgrades.
+- Validate the full package and dashboard plan before writing, return an exact-current no-op only for matching managed state, and retain exact pre-install rollback through the existing App controls.
+
 ## 1.1.17
 
 - Fix forward from immutable `v1.1.16` by including the reviewed Builder-entry `ha_client.py` change and its regression test; `v1.1.16` is preserved and not rewritten.

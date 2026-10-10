@@ -206,6 +206,14 @@ class ReleaseClient:
             result["url"] = manifest["url"]
         if isinstance(manifest.get("supported_home_assistant"), dict):
             result["supported_home_assistant"] = manifest["supported_home_assistant"]
+        for key in (
+            "package_version",
+            "component_version",
+            "foundation_version",
+            "package_schema",
+        ):
+            if isinstance(manifest.get(key), str):
+                result[key] = manifest[key]
         return result
 
     def download(self, manifest: dict[str, Any], destination: Path) -> None:
@@ -352,10 +360,13 @@ class InstallManager:
             _write_json_atomic(self.operations / f"{created}-install.json", receipt)
         return receipt
 
-    def rollback(self) -> dict[str, Any]:
+    def rollback_preflight(self) -> tuple[dict[str, Any], str, dict[str, Any], Path]:
+        """Validate every component predecessor source without mutating state."""
         if not self.current_receipt.is_file():
             raise InstallError("No successful install receipt is available to roll back")
         current = json.loads(self.current_receipt.read_text(encoding="utf-8"))
+        if not isinstance(current, dict):
+            raise InstallError("Current install receipt is invalid")
         backup_id = current.get("backup_id")
         if not isinstance(backup_id, str) or not backup_id:
             raise InstallError("Current install receipt has no backup identifier")
@@ -364,10 +375,19 @@ class InstallManager:
         if not backup_receipt_path.is_file():
             raise InstallError("Rollback backup receipt is missing")
         backup_receipt = json.loads(backup_receipt_path.read_text(encoding="utf-8"))
-        previous_present = bool(backup_receipt.get("previous_present"))
+        if not isinstance(backup_receipt, dict):
+            raise InstallError("Rollback backup receipt is invalid")
+        previous_present = backup_receipt.get("previous_present")
+        if not isinstance(previous_present, bool):
+            raise InstallError("Rollback backup receipt has invalid predecessor state")
         source = backup / COMPONENT
-        if previous_present and not source.is_dir():
+        if previous_present and (not source.is_dir() or source.is_symlink()):
             raise InstallError("Rollback integration backup is missing")
+        return current, backup_id, backup_receipt, source
+
+    def rollback(self) -> dict[str, Any]:
+        _current, backup_id, backup_receipt, source = self.rollback_preflight()
+        previous_present = backup_receipt["previous_present"]
 
         self.target.parent.mkdir(parents=True, exist_ok=True)
         stage = self.target.parent / f".{COMPONENT}.rollback.{uuid.uuid4().hex}"

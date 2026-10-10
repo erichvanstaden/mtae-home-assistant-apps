@@ -1,7 +1,6 @@
 """Ingress web application for Van Gogh 2 install/update/rollback."""
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import tempfile
@@ -11,27 +10,23 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from ha_client import HAClient, HADashboardWriteError, HAError, HARestartPending, module_url_for_release
+from ha_client import HAClient, HAError, HARestartPending, module_url_for_release
 from installer import InstallError, InstallManager, ReleaseClient
-from dashboard_migration import MigrationError, discover_dashboard
+from product_update import ProductUpdateError, ProductUpdateManager
 
 APP_ROOT = Path(__file__).resolve().parent
 DATA_ROOT = Path(os.environ.get("VAN_GOGH_DATA_ROOT", "/data"))
 CONFIG_ROOT = Path(os.environ.get("VAN_GOGH_CONFIG_ROOT", "/homeassistant"))
 SETTINGS = DATA_ROOT / "settings.json"
 OPERATION_RECEIPT = DATA_ROOT / "operation.json"
-REVIEW_DASHBOARD_PRESTATE = DATA_ROOT / "review-dashboard-prestate.json"
-HOME_MIGRATION_PRESTATE = DATA_ROOT / "home-c-grid-migration-prestate.json"
+SITE_MANIFEST = CONFIG_ROOT / "van_gogh2-site.json"
 INSTALL_LOCK = threading.Lock()
 OPERATION_LOCK = threading.Lock()
 DEFAULT_RELEASE_ENDPOINT = os.environ.get(
     "VAN_GOGH_RELEASE_ENDPOINT", "https://installer.mtae.com.au"
 ).rstrip("/")
-EXPECTED_RELEASE = "2.0.0-staging.10"
-EXPECTED_RELEASE_SHA256 = "b86ffe4cb6f5fae82b16faedbb2e1f2ce2ca3b4c617c29e237b42f1c0063c626"
-EXPECTED_HOME_ASSISTANT = "2026.8.3"
-MIGRATION_HOME_ASSISTANT = "2026.9.3"
-REVIEW_DASHBOARD_PATH = "van-gogh-c-grid-review"
+INSTALLER_VERSION = "1.2.0"
+PRODUCT_PACKAGE_SCHEMA = "mtae.van-gogh.product-package.v1"
 
 
 def _load_operation_state() -> dict[str, Any]:
@@ -110,90 +105,27 @@ def _atomic_settings(payload: dict[str, str]) -> None:
     os.replace(temporary, SETTINGS)
 
 
-def _atomic_private_json(path: Path, payload: dict[str, Any]) -> None:
-    DATA_ROOT.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
-    os.chmod(temporary, 0o600)
-    os.replace(temporary, path)
-
-
-def _validate_release_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
-    supported = manifest.get("supported_home_assistant")
-    if manifest.get("version") != EXPECTED_RELEASE:
-        raise InstallError(f"Installer 1.1.17 requires Van Gogh {EXPECTED_RELEASE}")
-    if manifest.get("sha256") != EXPECTED_RELEASE_SHA256:
-        raise InstallError("Van Gogh staging.10 archive identity did not match Installer 1.1.17")
-    if not isinstance(supported, dict) or supported.get("minimum") != EXPECTED_HOME_ASSISTANT or supported.get("tested") != EXPECTED_HOME_ASSISTANT:
-        raise InstallError(f"Installer 1.1.17 requires Home Assistant {EXPECTED_HOME_ASSISTANT} release metadata")
+def _validate_product_release_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Accept a compatible package identity; package contents enforce the full policy."""
+    if manifest.get("product") != "van-gogh2":
+        raise InstallError("Product release identity is not van-gogh2")
+    if manifest.get("package_schema") != PRODUCT_PACKAGE_SCHEMA:
+        raise InstallError("Product release package schema is unsupported")
+    if not isinstance(manifest.get("package_version"), str):
+        raise InstallError("Product release package version is missing")
+    foundation_version = manifest.get("foundation_version")
+    if not isinstance(foundation_version, str) or not foundation_version.strip():
+        raise InstallError("Product release Foundation version is missing or invalid")
+    if manifest.get("component_version") != manifest.get("version"):
+        raise InstallError("Product release component identity is inconsistent")
+    digest = manifest.get("sha256")
+    if not isinstance(digest, str) or len(digest) != 64:
+        raise InstallError("Product release SHA-256 is invalid")
+    try:
+        bytes.fromhex(digest)
+    except ValueError as error:
+        raise InstallError("Product release SHA-256 is invalid") from error
     return manifest
-
-
-def _review_config(payload: dict[str, Any]) -> dict[str, Any]:
-    config = payload.get("config")
-    if not isinstance(config, dict):
-        raise InstallError("Review dashboard JSON must contain a config object")
-    if not isinstance(config.get("views"), list) or not config["views"]:
-        raise InstallError("Review dashboard config must contain at least one view")
-    return config
-
-
-def _json_sha256(value: Any) -> str:
-    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-
-
-def _home_c_grid_migration() -> dict[str, Any]:
-    """Discover and migrate one supported Van Gogh Home schema, or write nothing."""
-    manager = InstallManager(CONFIG_ROOT)
-    if manager.installed_version() != EXPECTED_RELEASE:
-        raise InstallError(f"Install and verify Van Gogh {EXPECTED_RELEASE} before migrating Home")
-    ha = HAClient.from_environment()
-    if ha is None:
-        raise InstallError("Supervisor API token is unavailable")
-    core = ha.wait_ready()
-    if core.get("version") != MIGRATION_HOME_ASSISTANT:
-        raise InstallError(f"Home schema migration requires Home Assistant {MIGRATION_HOME_ASSISTANT}")
-    try:
-        plan = discover_dashboard(ha.storage_dashboard_inventory())
-    except MigrationError as error:
-        raise InstallError(str(error)) from error
-    if not plan.changed:
-        return {
-            "migrated": False,
-            "already_current": True,
-            "dashboard_path": plan.url_path,
-            "config_sha256": _json_sha256(plan.before),
-            "dashboard_writes": 0,
-            "readback_verified": True,
-        }
-    prestate = {
-        "url_path": plan.url_path,
-        "exists": True,
-        "registry": plan.registry,
-        "config": plan.before,
-    }
-    _atomic_private_json(HOME_MIGRATION_PRESTATE, prestate)
-    try:
-        result = ha.save_existing_dashboard(plan.url_path, plan.before, plan.after)
-    except HADashboardWriteError:
-        ha.restore_dashboard(prestate)
-        raise
-    try:
-        verified = discover_dashboard(ha.storage_dashboard_inventory())
-        if verified.url_path != plan.url_path or verified.state != "current" or verified.before != plan.after:
-            raise HAError("Home schema migration post-change discovery did not match the exact candidate")
-    except Exception:
-        ha.restore_dashboard(prestate)
-        raise
-    return {
-        "migrated": True,
-        "already_current": False,
-        "dashboard_path": plan.url_path,
-        "before_sha256": _json_sha256(plan.before),
-        "config_sha256": _json_sha256(plan.after),
-        **result,
-    }
 
 
 def _settings() -> dict[str, str]:
@@ -232,11 +164,10 @@ def _status() -> dict[str, Any]:
         "restart_required": bool(receipt and receipt.get("restart_required")),
         "last_install": receipt,
         "operation": _operation_snapshot(),
-        "supported_release": EXPECTED_RELEASE,
-        "supported_home_assistant": EXPECTED_HOME_ASSISTANT,
-        "home_schema_migration_home_assistant": MIGRATION_HOME_ASSISTANT,
-        "home_schema_migration_prestate_available": HOME_MIGRATION_PRESTATE.is_file(),
-        "review_dashboard_path": REVIEW_DASHBOARD_PATH,
+        "installer_version": INSTALLER_VERSION,
+        "product_package_schema": PRODUCT_PACKAGE_SCHEMA,
+        "site_manifest_path": str(SITE_MANIFEST),
+        "site_manifest_available": SITE_MANIFEST.is_file(),
     }
 
 
@@ -285,7 +216,7 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError as error:
             raise InstallError("Invalid request length") from error
-        limit = 1024 * 1024 if self.path.split("?", 1)[0] == "/api/review-dashboard" else 64 * 1024
+        limit = 64 * 1024
         if length < 0 or length > limit:
             raise InstallError(f"Request body exceeds {limit // 1024} KiB")
         try:
@@ -343,7 +274,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
             elif path == "/api/check":
                 operation_id = _operation_begin("release_check", "checking_release")
-                manifest = _validate_release_manifest(_release_client().latest())
+                manifest = _validate_product_release_manifest(_release_client().latest())
                 result = {"release": manifest, "credential_returned": False}
                 _operation_update(
                     operation_id,
@@ -357,19 +288,35 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     operation_id = _operation_begin("install", "checking_release")
                     client = _release_client()
-                    manifest = _validate_release_manifest(client.latest())
+                    manifest = _validate_product_release_manifest(client.latest())
                     module_url_for_release(manifest["version"])
                     manager = InstallManager(CONFIG_ROOT)
                     ha = HAClient.from_environment()
-                    prestate = ha.snapshot() if ha is not None else None
+                    if ha is None:
+                        raise InstallError("Supervisor API token is unavailable")
+                    if not SITE_MANIFEST.is_file():
+                        raise InstallError(f"Local site manifest is missing: {SITE_MANIFEST}")
+                    core = ha.wait_ready()
+                    core_version = str(core.get("version") or "")
+                    prestate = ha.snapshot()
                     _operation_update(operation_id, "downloading_release")
                     with tempfile.TemporaryDirectory(prefix="van-gogh2-download-") as temporary:
                         archive = Path(temporary) / "release.tar.gz"
                         client.download(manifest, archive)
-                        _operation_update(operation_id, "installing_files")
-                        receipt = manager.install_archive(archive, manifest)
-                    if ha is not None and prestate is not None:
+                        _operation_update(operation_id, "applying_product_update")
+                        updater = ProductUpdateManager(manager, ha, INSTALLER_VERSION)
+                        product_result = updater.apply(
+                            archive,
+                            manifest,
+                            SITE_MANIFEST,
+                            core_version,
+                        )
+                    receipt: dict[str, Any] | None = None
+                    if product_result["file_writes"]:
                         receipt = manager.annotate_current({"ha_prestate": prestate})
+                    elif manager.current_receipt.is_file():
+                        receipt = json.loads(manager.current_receipt.read_text(encoding="utf-8"))
+                    if product_result["file_writes"]:
                         try:
                             _operation_update(operation_id, "requesting_restart")
                             restart_cycle = ha.restart_and_wait_ready(
@@ -387,7 +334,7 @@ class Handler(BaseHTTPRequestHandler):
                         except HAError as error:
                             try:
                                 _operation_update(operation_id, "automatic_rollback")
-                                manager.rollback()
+                                updater.rollback()
                                 ha.restart_and_wait_ready(
                                     progress=lambda stage: _operation_update(operation_id, stage)
                                 )
@@ -404,100 +351,21 @@ class Handler(BaseHTTPRequestHandler):
                             raise InstallError(
                                 f"Install readiness failed; automatic rollback completed: {error}"
                             ) from error
-                    result = {"installed": True, "receipt": receipt}
+                    result = {
+                        "installed": True,
+                        "product_update": product_result,
+                        "receipt": receipt,
+                    }
                     _operation_update(
                         operation_id,
                         "complete",
                         "complete",
                         message=(
-                            "Installed and verified"
-                            if ha is not None
-                            else "Installed; Home Assistant restart required"
+                            "Product package, local configuration and readiness verified"
+                            if product_result["operation"] != "noop"
+                            else "Product package and local configuration are already current"
                         ),
                     )
-                finally:
-                    INSTALL_LOCK.release()
-            elif path == "/api/home-schema/migrate":
-                if payload.get("confirm") != "migrate":
-                    raise InstallError("Home schema migration requires confirm=migrate")
-                if not INSTALL_LOCK.acquire(blocking=False):
-                    raise InstallError("Another installer operation is already running")
-                try:
-                    operation_id = _operation_begin("home_schema_migration", "discovering_home_schema")
-                    result = _home_c_grid_migration()
-                    _operation_update(
-                        operation_id,
-                        "complete",
-                        "complete",
-                        message=(
-                            "Home C-grid schema migrated and verified"
-                            if result["migrated"]
-                            else "Home C-grid schema is already current"
-                        ),
-                    )
-                finally:
-                    INSTALL_LOCK.release()
-            elif path == "/api/home-schema/rollback":
-                if payload.get("confirm") != "rollback":
-                    raise InstallError("Home schema rollback requires confirm=rollback")
-                if not HOME_MIGRATION_PRESTATE.is_file():
-                    raise InstallError("No Home schema migration prestate is available")
-                if not INSTALL_LOCK.acquire(blocking=False):
-                    raise InstallError("Another installer operation is already running")
-                try:
-                    operation_id = _operation_begin("home_schema_rollback", "restoring_home_schema")
-                    ha = HAClient.from_environment()
-                    if ha is None:
-                        raise InstallError("Supervisor API token is unavailable")
-                    prestate = json.loads(HOME_MIGRATION_PRESTATE.read_text(encoding="utf-8"))
-                    result = {"home_schema": ha.restore_dashboard(prestate), "dashboard_writes": 1}
-                    _operation_update(operation_id, "complete", "complete", message="Home schema prestate restored")
-                finally:
-                    INSTALL_LOCK.release()
-            elif path == "/api/review-dashboard":
-                if not INSTALL_LOCK.acquire(blocking=False):
-                    raise InstallError("Another installer operation is already running")
-                try:
-                    operation_id = _operation_begin("review_dashboard", "saving_review_dashboard")
-                    manager = InstallManager(CONFIG_ROOT)
-                    if manager.installed_version() != EXPECTED_RELEASE:
-                        raise InstallError(f"Install and verify Van Gogh {EXPECTED_RELEASE} before refreshing the review dashboard")
-                    ha = HAClient.from_environment()
-                    if ha is None:
-                        raise InstallError("Supervisor API token is unavailable")
-                    core = ha.wait_ready()
-                    if core.get("version") != EXPECTED_HOME_ASSISTANT:
-                        raise InstallError(f"Review dashboard refresh requires Home Assistant {EXPECTED_HOME_ASSISTANT}")
-                    prestate = ha.dashboard_snapshot(REVIEW_DASHBOARD_PATH)
-                    _atomic_private_json(REVIEW_DASHBOARD_PRESTATE, prestate)
-                    try:
-                        dashboard = ha.save_review_dashboard(
-                            REVIEW_DASHBOARD_PATH,
-                            _review_config(payload),
-                            title="Van Gogh Family staging.8 review",
-                        )
-                    except Exception:
-                        ha.restore_dashboard(prestate)
-                        raise
-                    result = {"review_dashboard": dashboard, "owner_route": f"/{REVIEW_DASHBOARD_PATH}/home"}
-                    _operation_update(operation_id, "complete", "complete", message="Family review dashboard refreshed and verified")
-                finally:
-                    INSTALL_LOCK.release()
-            elif path == "/api/review-dashboard/rollback":
-                if payload.get("confirm") != "rollback":
-                    raise InstallError("Review dashboard rollback requires confirm=rollback")
-                if not REVIEW_DASHBOARD_PRESTATE.is_file():
-                    raise InstallError("No review dashboard prestate is available")
-                if not INSTALL_LOCK.acquire(blocking=False):
-                    raise InstallError("Another installer operation is already running")
-                try:
-                    operation_id = _operation_begin("review_dashboard_rollback", "restoring_review_dashboard")
-                    ha = HAClient.from_environment()
-                    if ha is None:
-                        raise InstallError("Supervisor API token is unavailable")
-                    prestate = json.loads(REVIEW_DASHBOARD_PRESTATE.read_text(encoding="utf-8"))
-                    result = {"review_dashboard": ha.restore_dashboard(prestate)}
-                    _operation_update(operation_id, "complete", "complete", message="Family review dashboard restored")
                 finally:
                     INSTALL_LOCK.release()
             elif path == "/api/rollback":
@@ -512,8 +380,17 @@ class Handler(BaseHTTPRequestHandler):
                         raise InstallError("No successful install receipt is available to roll back")
                     current = json.loads(manager.current_receipt.read_text(encoding="utf-8"))
                     prestate = current.get("ha_prestate")
-                    receipt = manager.rollback()
                     ha = HAClient.from_environment()
+                    if ha is not None and isinstance(current.get("dashboard_prestate"), dict):
+                        product_rollback = ProductUpdateManager(
+                            manager,
+                            ha,
+                            INSTALLER_VERSION,
+                        ).rollback()
+                        receipt = product_rollback["files"]
+                        receipt["dashboard"] = product_rollback["dashboard"]
+                    else:
+                        receipt = manager.rollback()
                     if ha is not None and isinstance(prestate, dict):
                         try:
                             _operation_update(operation_id, "requesting_restart")
@@ -559,7 +436,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
             self._json(HTTPStatus.OK, result)
-        except (InstallError, HAError) as error:
+        except (InstallError, ProductUpdateError, HAError) as error:
             if operation_id is not None:
                 if isinstance(error, HARestartPending):
                     _operation_update(

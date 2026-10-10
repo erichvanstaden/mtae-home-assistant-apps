@@ -1,0 +1,807 @@
+"""Site-neutral Van Gogh product-package planning, application and rollback."""
+from __future__ import annotations
+
+from copy import deepcopy
+from dataclasses import dataclass
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+from typing import Any
+import uuid
+
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError, ValidationError
+
+from dashboard_migration import HOME_VIEW_TYPE, MigrationError, discover_dashboard
+from installer import InstallManager, safe_extract, sha256_file
+
+PACKAGE_SCHEMA = "mtae.van-gogh.product-package.v1"
+CATALOGUE_SCHEMA = "mtae.van-gogh.feature-catalogue.v1"
+PRODUCT_SCHEMA_VERSION = 2
+FOUNDATION_BUNDLE_ID = "van-gogh-foundation-site-neutral"
+FOUNDATION_VERSION = "1.5.0"
+SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?$")
+PATH = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+SECRET_WORDS = re.compile(r"(?:password|secret|token|credential|api[_-]?key|install[_-]?code)", re.I)
+PRODUCT_MARKER = "van_gogh_product"
+MANAGED_FOUNDATION = "van_gogh_managed_foundation"
+FOUNDATION_TARGETS = {
+    "assets": Path("www") / "van-gogh" / FOUNDATION_VERSION,
+    "owner_maintenance": Path("custom_components") / "mtae_owner_maintenance",
+}
+
+
+class ProductUpdateError(RuntimeError):
+    """Raised before mutation when a package, site, or installed state is unsafe."""
+
+
+@dataclass(frozen=True)
+class ProductPackage:
+    manifest: dict[str, Any]
+    catalogue: dict[str, Any]
+    site_schema: dict[str, Any]
+    archive: Path
+    archive_sha256: str
+
+
+@dataclass(frozen=True)
+class ProductPlan:
+    state: str
+    url_path: str
+    title: str
+    before: dict[str, Any] | None
+    after: dict[str, Any]
+    dashboard_changed: bool
+
+
+def _json_member(package: tarfile.TarFile, name: str) -> dict[str, Any]:
+    try:
+        member = package.getmember(name)
+        stream = package.extractfile(member)
+    except (KeyError, tarfile.TarError) as error:
+        raise ProductUpdateError(f"Product package is missing {name}") from error
+    if stream is None or not member.isfile() or member.size > 2 * 1024 * 1024:
+        raise ProductUpdateError(f"Product package member {name} is invalid")
+    try:
+        value = json.loads(stream.read().decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ProductUpdateError(f"Product package member {name} is invalid JSON") from error
+    if not isinstance(value, dict):
+        raise ProductUpdateError(f"Product package member {name} must be an object")
+    return value
+
+
+def _version(value: Any) -> tuple[int, int, int, tuple[tuple[int, str], ...]]:
+    match = SEMVER.fullmatch(str(value))
+    if not match:
+        raise ProductUpdateError(f"Invalid semantic version: {value!r}")
+    prerelease: list[tuple[int, str]] = []
+    if match.group(4):
+        for part in match.group(4).split("."):
+            prerelease.append((0, f"{int(part):020d}") if part.isdigit() else (1, part))
+    else:
+        prerelease.append((2, ""))
+    return int(match.group(1)), int(match.group(2)), int(match.group(3)), tuple(prerelease)
+
+
+def _in_range(value: str, policy: Any, label: str) -> None:
+    if not isinstance(policy, dict):
+        raise ProductUpdateError(f"Product package {label} compatibility is missing")
+    minimum = policy.get("minimum")
+    maximum = policy.get("maximum_exclusive")
+    parsed = _version(value)
+    if parsed < _version(minimum) or parsed >= _version(maximum):
+        raise ProductUpdateError(f"{label} {value} is outside supported range >={minimum},<{maximum}")
+
+
+def inspect_package(archive: Path, expected_sha256: str | None = None) -> ProductPackage:
+    """Verify outer identity, exact inventory, and independent bundled identities."""
+    actual_sha = sha256_file(archive)
+    if expected_sha256 is not None and actual_sha != expected_sha256:
+        raise ProductUpdateError("Product-package SHA-256 does not match release metadata")
+    try:
+        with tarfile.open(archive, "r:gz") as package:
+            members = package.getmembers()
+            by_name = {member.name.removeprefix("./"): member for member in members}
+            if len(by_name) != len(members):
+                raise ProductUpdateError("Product package contains duplicate member names")
+            for name, member in by_name.items():
+                path = Path(name)
+                if path.is_absolute() or ".." in path.parts or not member.isfile():
+                    raise ProductUpdateError(f"Product package contains unsafe member {name!r}")
+            manifest = _json_member(package, "product-package.json")
+            if manifest.get("schema") != PACKAGE_SCHEMA or manifest.get("product") != "van-gogh2":
+                raise ProductUpdateError("Product-package schema or product identity is unsupported")
+            _version(manifest.get("package_version"))
+            _version(manifest.get("component_version"))
+            inventory = manifest.get("file_inventory")
+            if not isinstance(inventory, list) or not inventory:
+                raise ProductUpdateError("Product-package file inventory is missing")
+            expected_paths: set[str] = set()
+            for row in inventory:
+                if not isinstance(row, dict) or not isinstance(row.get("path"), str):
+                    raise ProductUpdateError("Product-package file inventory row is invalid")
+                name = row["path"]
+                if name in expected_paths or name == "product-package.json":
+                    raise ProductUpdateError("Product-package file inventory is ambiguous")
+                expected_paths.add(name)
+                member = by_name.get(name)
+                stream = package.extractfile(member) if member is not None else None
+                if member is None or stream is None or not member.isfile():
+                    raise ProductUpdateError(f"Product-package inventory member {name!r} is missing")
+                data = stream.read()
+                if len(data) != row.get("size") or hashlib.sha256(data).hexdigest() != row.get("sha256"):
+                    raise ProductUpdateError(f"Product-package inventory member {name!r} failed verification")
+            if set(by_name) - {"product-package.json"} != expected_paths:
+                raise ProductUpdateError("Product-package file set does not match its inventory")
+            catalogue_name = manifest.get("feature_catalogue")
+            site_schema_meta = manifest.get("site_manifest_schema")
+            foundation = manifest.get("foundation")
+            if not isinstance(catalogue_name, str) or not isinstance(site_schema_meta, dict):
+                raise ProductUpdateError("Product-package catalogue/schema pointers are invalid")
+            if not isinstance(foundation, dict):
+                raise ProductUpdateError("Product-package Foundation identity is missing")
+            catalogue = _json_member(package, catalogue_name)
+            site_schema_path = site_schema_meta.get("path")
+            if not isinstance(site_schema_path, str):
+                raise ProductUpdateError("Product-package site schema path is invalid")
+            site_schema = _json_member(package, site_schema_path)
+            bundle = _json_member(package, str(foundation.get("bundle_manifest") or ""))
+            component = _json_member(package, "custom_components/van_gogh2/manifest.json")
+    except (OSError, tarfile.TarError) as error:
+        raise ProductUpdateError("Product package is not a readable gzip tar archive") from error
+    if component.get("domain") != "van_gogh2" or component.get("version") != manifest.get("component_version"):
+        raise ProductUpdateError("Shared component identity does not match product-package metadata")
+    if (
+        foundation.get("bundle_id") != FOUNDATION_BUNDLE_ID
+        or foundation.get("version") != FOUNDATION_VERSION
+        or bundle.get("bundle_id") != FOUNDATION_BUNDLE_ID
+        or bundle.get("version") != FOUNDATION_VERSION
+    ):
+        raise ProductUpdateError("Bundled Foundation identity is unsupported")
+    schema_inventory = {row["path"]: row for row in manifest["file_inventory"]}
+    schema_row = schema_inventory.get(site_schema_path)
+    if not schema_row or schema_row.get("sha256") != site_schema_meta.get("sha256"):
+        raise ProductUpdateError("Canonical site-manifest schema identity does not match inventory")
+    if site_schema_meta.get("version") != 1:
+        raise ProductUpdateError("Canonical site-manifest schema version is unsupported")
+    if catalogue.get("schema") != CATALOGUE_SCHEMA or catalogue.get("schema_version") != 1:
+        raise ProductUpdateError("Feature catalogue schema is unsupported")
+    if (
+        catalogue.get("foundation_bundle_id") != FOUNDATION_BUNDLE_ID
+        or catalogue.get("foundation_version") != FOUNDATION_VERSION
+    ):
+        raise ProductUpdateError("Feature catalogue does not target the bundled Foundation")
+    return ProductPackage(manifest, catalogue, site_schema, archive, actual_sha)
+
+
+def _contains_secret_key(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(SECRET_WORDS.search(str(key)) or _contains_secret_key(child) for key, child in value.items())
+    if isinstance(value, list):
+        return any(_contains_secret_key(child) for child in value)
+    return False
+
+
+def _pointer(value: dict[str, Any], pointer: str) -> Any:
+    current: Any = value
+    if not pointer.startswith("/"):
+        raise ProductUpdateError(f"Feature catalogue pointer is invalid: {pointer!r}")
+    for segment in pointer[1:].split("/"):
+        if not isinstance(current, dict) or segment not in current:
+            raise ProductUpdateError(f"Site manifest does not satisfy feature pointer {pointer}")
+        current = current[segment]
+    return current
+
+
+def validate_site_manifest(site: Any, package: ProductPackage) -> dict[str, Any]:
+    """Validate the untouched local manifest against the packaged canonical schema."""
+    if not isinstance(site, dict):
+        raise ProductUpdateError("Local site manifest must be a JSON object")
+    try:
+        Draft202012Validator.check_schema(package.site_schema)
+        Draft202012Validator(package.site_schema).validate(site)
+    except (SchemaError, ValidationError) as error:
+        path = "/" + "/".join(str(part) for part in getattr(error, "absolute_path", []))
+        raise ProductUpdateError(f"Local site manifest fails canonical schema at {path}: {error.message}") from error
+    if site.get("schema_version") != package.manifest["site_manifest_schema"]["version"]:
+        raise ProductUpdateError("Local site-manifest version is unsupported")
+    if _contains_secret_key(site):
+        raise ProductUpdateError("Secrets and credentials are forbidden in the site manifest")
+    features = package.catalogue.get("features")
+    if not isinstance(features, dict) or not features:
+        raise ProductUpdateError("Feature catalogue entries are invalid")
+    for name, entry in features.items():
+        if not isinstance(entry, dict) or entry.get("optional") is not True:
+            raise ProductUpdateError(f"Feature catalogue entry {name} is invalid")
+        enabled = _pointer(site, str(entry.get("manifest_pointer") or ""))
+        content = _pointer(site, str(entry.get("content_pointer") or ""))
+        if not isinstance(enabled, bool) or not isinstance(content, list):
+            raise ProductUpdateError(f"Feature catalogue entry {name} does not match the canonical manifest")
+        if enabled and not content:
+            raise ProductUpdateError(f"Enabled feature {name} has no configured content")
+    return deepcopy(site)
+
+
+def _enabled_features(site: dict[str, Any], package: ProductPackage) -> list[str]:
+    return sorted(
+        name
+        for name, entry in package.catalogue["features"].items()
+        if _pointer(site, entry["manifest_pointer"]) is True
+    )
+
+
+def _schema_marker(package: ProductPackage, site: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": PRODUCT_SCHEMA_VERSION,
+        "package_version": package.manifest["package_version"],
+        "component_version": package.manifest["component_version"],
+        "foundation_version": package.manifest["foundation"]["version"],
+        "site_schema_version": site["schema_version"],
+        "feature_catalogue_version": package.catalogue["catalogue_version"],
+        "enabled_features": _enabled_features(site, package),
+    }
+
+
+def build_foundation_release(
+    package: ProductPackage,
+    site_manifest_path: Path,
+    workspace: Path,
+) -> tuple[Path, dict[str, Any]]:
+    """Run the exact packaged Foundation generator in an isolated local directory."""
+    extracted = workspace / "package"
+    release_root = workspace / "foundation-release"
+    safe_extract(package.archive, extracted)
+    foundation_root = extracted / package.manifest["foundation"]["root"]
+    command = [
+        sys.executable,
+        "-m",
+        "van_gogh.tools.cli",
+        "build",
+        str(site_manifest_path.resolve()),
+        "--output",
+        str(release_root),
+    ]
+    environment = os.environ.copy()
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    environment["PYTHONPATH"] = str(foundation_root)
+    completed = subprocess.run(
+        command,
+        cwd=foundation_root,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=120,
+        check=False,
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip().splitlines()
+        safe_detail = detail[-1][:300] if detail else "unknown generator failure"
+        raise ProductUpdateError(f"Canonical Foundation generator rejected the site manifest: {safe_detail}")
+    try:
+        dashboard = json.loads((release_root / "dashboard.json").read_text(encoding="utf-8"))
+        release_manifest = json.loads((release_root / "release.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ProductUpdateError("Canonical Foundation generator did not emit a valid release") from error
+    if (
+        not isinstance(dashboard, dict)
+        or not isinstance(dashboard.get("views"), list)
+        or not dashboard["views"]
+        or release_manifest.get("bundle_version") != FOUNDATION_VERSION
+        or release_manifest.get("status") != "generated-not-deployed"
+    ):
+        raise ProductUpdateError("Canonical Foundation release identity or dashboard shape is unsupported")
+    declared_files = release_manifest.get("files")
+    if not isinstance(declared_files, dict) or declared_files != _tree_inventory(
+        release_root, excluded={"release.json"}
+    ):
+        raise ProductUpdateError("Canonical Foundation release file inventory failed verification")
+    return release_root, dashboard
+
+
+def _managed_foundation_view(view: Any) -> bool:
+    """Match only views carrying the updater's explicit ownership marker.
+
+    The historical ``custom:van-gogh-wall10-view`` type is a supported schema
+    marker, not an ownership grant. Current and legacy views of that type may
+    contain local cards, bindings, order and settings that must survive.
+    """
+    return isinstance(view, dict) and MANAGED_FOUNDATION in view
+
+
+def _compose_dashboard(
+    generated: dict[str, Any],
+    base: dict[str, Any] | None,
+    package: ProductPackage,
+    site: dict[str, Any],
+) -> dict[str, Any]:
+    foundation_views = deepcopy(generated["views"])
+    for foundation_view in foundation_views:
+        if not isinstance(foundation_view, dict):
+            raise ProductUpdateError("Canonical Foundation release contains a non-object view")
+        foundation_view[MANAGED_FOUNDATION] = {
+            "schema_version": PRODUCT_SCHEMA_VERSION,
+            "foundation_version": FOUNDATION_VERSION,
+        }
+    if base is None:
+        result = deepcopy(generated)
+        result["views"] = foundation_views
+    else:
+        result = deepcopy(base)
+        views = result.get("views")
+        if not isinstance(views, list):
+            raise ProductUpdateError("Installed dashboard config has no view array")
+        generated_by_path = {
+            str(view.get("path")): view
+            for view in foundation_views
+            if isinstance(view.get("path"), str) and view.get("path")
+        }
+        consumed_paths: set[str] = set()
+        preserved_paths: set[str] = set()
+        composed: list[Any] = []
+        for existing in views:
+            path = str(existing.get("path") or "") if isinstance(existing, dict) else ""
+            if _managed_foundation_view(existing):
+                replacement = generated_by_path.get(path)
+                if replacement is not None:
+                    composed.append(replacement)
+                    consumed_paths.add(path)
+                # A previously managed optional route is removed when disabled.
+                continue
+            composed.append(deepcopy(existing))
+            if path:
+                preserved_paths.add(path)
+        composed.extend(
+            view
+            for view in foundation_views
+            if str(view.get("path") or "") not in consumed_paths | preserved_paths
+        )
+        result["views"] = composed
+    result[PRODUCT_MARKER] = _schema_marker(package, site)
+    return result
+
+
+def plan_update(
+    package: ProductPackage,
+    site: dict[str, Any],
+    inventory: list[dict[str, Any]],
+    generated: dict[str, Any],
+) -> ProductPlan:
+    """Create a complete plan; unsupported states never become writes."""
+    product_rows = []
+    for row in inventory:
+        config = row.get("config") if isinstance(row, dict) else None
+        if isinstance(config, dict) and PRODUCT_MARKER in config:
+            marker = config[PRODUCT_MARKER]
+            if not isinstance(marker, dict) or marker.get("schema_version") != PRODUCT_SCHEMA_VERSION:
+                raise ProductUpdateError("Installed dashboard product schema is unsupported")
+            product_rows.append(row)
+    if len(product_rows) > 1:
+        raise ProductUpdateError("Multiple Installer-managed Van Gogh dashboards were discovered")
+    if product_rows:
+        row = product_rows[0]
+        registry = row.get("registry")
+        before = row.get("config")
+        if not isinstance(registry, dict) or not isinstance(before, dict):
+            raise ProductUpdateError("Installed product dashboard snapshot is invalid")
+        path = str(registry.get("url_path") or "")
+        if not PATH.fullmatch(path):
+            raise ProductUpdateError("Installed product dashboard path is invalid")
+        after = _compose_dashboard(generated, before, package, site)
+        return ProductPlan(
+            "current_upgrade",
+            path,
+            str(registry.get("title") or generated.get("title") or site["site"]["title"]),
+            deepcopy(before),
+            after,
+            after != before,
+        )
+    try:
+        existing = discover_dashboard(inventory)
+    except MigrationError as error:
+        if str(error) != "No supported Installer-managed Van Gogh dashboard was discovered":
+            raise ProductUpdateError(str(error)) from error
+        productish = []
+        for row in inventory:
+            config = row.get("config") if isinstance(row, dict) else None
+            if isinstance(config, dict) and any(
+                isinstance(view, dict) and (view.get("type") == HOME_VIEW_TYPE or MANAGED_FOUNDATION in view)
+                for view in config.get("views", [])
+            ):
+                productish.append(row)
+        if productish:
+            raise ProductUpdateError("Unsupported Van Gogh dashboard state was discovered")
+        target_path = str(site["site"]["id"])
+        if not PATH.fullmatch(target_path):
+            raise ProductUpdateError("Canonical site id cannot be used as a dashboard path")
+        if any(
+            isinstance(row, dict)
+            and isinstance(row.get("registry"), dict)
+            and row["registry"].get("url_path") == target_path
+            for row in inventory
+        ):
+            raise ProductUpdateError("Clean-install dashboard path is already occupied")
+        after = _compose_dashboard(generated, None, package, site)
+        return ProductPlan("clean_install", target_path, str(generated.get("title") or site["site"]["title"]), None, after, True)
+    after = _compose_dashboard(generated, existing.after, package, site)
+    return ProductPlan(
+        "legacy_upgrade" if existing.state == "upgrade" else "current_upgrade",
+        existing.url_path,
+        str(existing.registry.get("title") or generated.get("title") or site["site"]["title"]),
+        deepcopy(existing.before),
+        after,
+        after != existing.before,
+    )
+
+
+def site_manifest_sha256(path: Path) -> str:
+    return sha256_file(path)
+
+
+def _tree_inventory(
+    root: Path,
+    *,
+    excluded: set[str] | None = None,
+    ignore_runtime_cache: bool = False,
+) -> dict[str, dict[str, Any]] | None:
+    """Return a normalized exact file inventory, or ``None`` for unsafe trees."""
+    if not root.is_dir() or root.is_symlink():
+        return None
+    rows: dict[str, dict[str, Any]] = {}
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            return None
+        if not path.is_file():
+            continue
+        if excluded and relative in excluded:
+            continue
+        if ignore_runtime_cache and ("__pycache__" in path.parts or path.suffix == ".pyc"):
+            continue
+        rows[relative] = {"bytes": path.stat().st_size, "sha256": sha256_file(path)}
+    return rows
+
+
+def _component_expected_inventory(package: ProductPackage) -> dict[str, dict[str, Any]]:
+    prefix = "custom_components/van_gogh2/"
+    return {
+        row["path"][len(prefix):]: {"bytes": row["size"], "sha256": row["sha256"]}
+        for row in package.manifest["file_inventory"]
+        if row["path"].startswith(prefix)
+    }
+
+
+class ProductUpdateManager:
+    """Transaction coordinator over component, Foundation files and dashboard."""
+
+    def __init__(self, installer: InstallManager, ha: Any, installer_version: str) -> None:
+        self.installer = installer
+        self.ha = ha
+        self.installer_version = installer_version
+
+    def _foundation_sources(self, release_root: Path) -> dict[str, Path]:
+        return {
+            "assets": release_root / "assets",
+            "owner_maintenance": release_root / "custom_components" / "mtae_owner_maintenance",
+        }
+
+    def _managed_files_current(self, package: ProductPackage, release_root: Path) -> bool:
+        component_actual = _tree_inventory(
+            self.installer.target,
+            ignore_runtime_cache=True,
+        )
+        if component_actual != _component_expected_inventory(package):
+            return False
+        for key, source in self._foundation_sources(release_root).items():
+            expected = _tree_inventory(source)
+            target = self.installer.config_root / FOUNDATION_TARGETS[key]
+            if expected is None or _tree_inventory(target) != expected:
+                return False
+        return True
+
+    def _install_foundation_files(self, release_root: Path, backup_id: str) -> list[dict[str, Any]]:
+        backup_root = self.installer.backups / backup_id / "product-files"
+        backup_root.mkdir(parents=True, exist_ok=False)
+        rows: list[dict[str, Any]] = []
+        completed: list[str] = []
+        try:
+            for key, source in self._foundation_sources(release_root).items():
+                if not source.is_dir():
+                    raise ProductUpdateError(f"Generated Foundation release is missing {key}")
+                target = self.installer.config_root / FOUNDATION_TARGETS[key]
+                previous_present = target.is_dir()
+                if previous_present:
+                    shutil.copytree(target, backup_root / key)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                stage = target.parent / f".{target.name}.new.{uuid.uuid4().hex}"
+                displaced = target.parent / f".{target.name}.old.{uuid.uuid4().hex}"
+                shutil.copytree(source, stage)
+                if target.exists():
+                    os.replace(target, displaced)
+                os.replace(stage, target)
+                shutil.rmtree(displaced, ignore_errors=True)
+                completed.append(key)
+                rows.append({"key": key, "previous_present": previous_present})
+        except Exception:
+            for key in reversed(completed):
+                target = self.installer.config_root / FOUNDATION_TARGETS[key]
+                shutil.rmtree(target, ignore_errors=True)
+                previous = backup_root / key
+                if previous.is_dir():
+                    shutil.copytree(previous, target)
+            shutil.rmtree(backup_root, ignore_errors=True)
+            raise
+        return rows
+
+    def _foundation_rollback_plan(
+        self, receipt: dict[str, Any]
+    ) -> list[tuple[str, Path, Path | None]]:
+        backup_id = receipt.get("backup_id")
+        rows = receipt.get("foundation_files")
+        if not isinstance(backup_id, str) or not isinstance(rows, list):
+            raise ProductUpdateError("Product-update receipt has no Foundation file prestate")
+        backup_root = self.installer.backups / backup_id / "product-files"
+        plan: list[tuple[str, Path, Path | None]] = []
+        seen: set[str] = set()
+        for row in rows:
+            if not isinstance(row, dict) or row.get("key") not in FOUNDATION_TARGETS:
+                raise ProductUpdateError("Product-update Foundation rollback receipt is invalid")
+            key = row["key"]
+            previous_present = row.get("previous_present")
+            if key in seen or not isinstance(previous_present, bool):
+                raise ProductUpdateError("Product-update Foundation rollback receipt is invalid")
+            source = backup_root / key if previous_present else None
+            if source is not None and (not source.is_dir() or source.is_symlink()):
+                raise ProductUpdateError(f"Foundation rollback backup is missing {key}")
+            plan.append((key, self.installer.config_root / FOUNDATION_TARGETS[key], source))
+            seen.add(key)
+        if seen != set(FOUNDATION_TARGETS):
+            raise ProductUpdateError("Product-update Foundation rollback receipt is incomplete")
+        return plan
+
+    def _restore_foundation_files(
+        self,
+        receipt: dict[str, Any],
+        plan: list[tuple[str, Path, Path | None]] | None = None,
+        stages: dict[str, Path | None] | None = None,
+    ) -> int:
+        plan = plan if plan is not None else self._foundation_rollback_plan(receipt)
+        stages = stages if stages is not None else self._stage_foundation_rollback(plan)
+        restored = 0
+        swaps: list[tuple[Path, Path | None, Path]] = []
+        moved_targets: set[Path] = set()
+        installed_targets: set[Path] = set()
+        try:
+            for key, target, _source in reversed(plan):
+                stage = stages[key]
+                displaced = target.parent / f".{target.name}.displaced.{uuid.uuid4().hex}"
+                target_present = target.exists() or target.is_symlink()
+                swaps.append((target, stage, displaced))
+                if target_present:
+                    os.replace(target, displaced)
+                    moved_targets.add(target)
+                if stage is not None:
+                    os.replace(stage, target)
+                    installed_targets.add(target)
+                restored += 1
+        except Exception as error:
+            recovery_errors: list[str] = []
+            for target, stage, displaced in reversed(swaps):
+                try:
+                    if target in installed_targets or target in moved_targets:
+                        self._remove_foundation_path(target)
+                    if target in moved_targets and (displaced.exists() or displaced.is_symlink()):
+                        os.replace(displaced, target)
+                    self._remove_foundation_path(stage)
+                    self._remove_foundation_path(displaced)
+                except Exception as recovery_error:
+                    recovery_errors.append(str(recovery_error))
+            self._discard_foundation_stages(stages)
+            if recovery_errors:
+                raise ProductUpdateError(
+                    "Foundation rollback swap failed and current-state recovery failed: "
+                    + "; ".join(recovery_errors)
+                ) from error
+            raise
+        for _target, _stage, displaced in swaps:
+            self._remove_foundation_path(displaced)
+        self._discard_foundation_stages(stages)
+        return restored
+
+    @staticmethod
+    def _remove_foundation_path(path: Path | None) -> None:
+        if path is None:
+            return
+        if path.is_symlink() or path.is_file():
+            path.unlink(missing_ok=True)
+        elif path.is_dir():
+            shutil.rmtree(path)
+
+    @staticmethod
+    def _discard_foundation_stages(stages: dict[str, Path | None]) -> None:
+        for stage in stages.values():
+            if stage is not None:
+                shutil.rmtree(stage, ignore_errors=True)
+
+    def _stage_foundation_rollback(
+        self,
+        plan: list[tuple[str, Path, Path | None]],
+    ) -> dict[str, Path | None]:
+        stages: dict[str, Path | None] = {}
+        try:
+            for key, target, source in plan:
+                if source is None:
+                    stages[key] = None
+                    continue
+                stage = target.parent / f".{target.name}.rollback.{uuid.uuid4().hex}"
+                stages[key] = stage
+                shutil.copytree(source, stage)
+        except Exception:
+            self._discard_foundation_stages(stages)
+            raise
+        return stages
+
+    def apply(
+        self,
+        archive: Path,
+        release: dict[str, Any],
+        site_manifest_path: Path,
+        home_assistant_version: str,
+    ) -> dict[str, Any]:
+        package = inspect_package(archive, str(release.get("sha256") or ""))
+        if str(release.get("package_version")) != package.manifest["package_version"]:
+            raise ProductUpdateError("Release and package versions do not match")
+        if str(release.get("foundation_version")) != package.manifest["foundation"]["version"]:
+            raise ProductUpdateError("Release and Foundation versions do not match")
+        _in_range(self.installer_version, package.manifest.get("installer"), "Installer")
+        _in_range(home_assistant_version, package.manifest.get("home_assistant"), "Home Assistant")
+        if not site_manifest_path.is_file():
+            raise ProductUpdateError("Local canonical site manifest is missing")
+        before_site_sha = site_manifest_sha256(site_manifest_path)
+        try:
+            site_raw = json.loads(site_manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ProductUpdateError("Local site manifest cannot be read as JSON") from error
+        site = validate_site_manifest(site_raw, package)
+        with tempfile.TemporaryDirectory(prefix="van-gogh-product-update-") as temporary:
+            release_root, generated = build_foundation_release(package, site_manifest_path, Path(temporary))
+            inventory = self.ha.storage_dashboard_inventory()
+            plan = plan_update(package, site, inventory, generated)
+            current = None
+            if self.installer.current_receipt.is_file():
+                try:
+                    current = json.loads(self.installer.current_receipt.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    current = None
+            package_current = (
+                self.installer.installed_version() == package.manifest["component_version"]
+                and isinstance(current, dict)
+                and current.get("package_version") == package.manifest["package_version"]
+                and current.get("archive_sha256") == package.archive_sha256
+                and current.get("site_manifest_sha256") == before_site_sha
+                and self._managed_files_current(package, release_root)
+            )
+            if package_current and not plan.dashboard_changed:
+                return {
+                    "operation": "noop",
+                    "state": plan.state,
+                    "package_version": package.manifest["package_version"],
+                    "component_version": package.manifest["component_version"],
+                    "foundation_version": package.manifest["foundation"]["version"],
+                    "file_writes": 0,
+                    "dashboard_writes": 0,
+                    "site_manifest_writes": 0,
+                    "site_manifest_sha256": before_site_sha,
+                }
+            snapshot = self.ha.dashboard_snapshot(plan.url_path)
+            component_changed = False
+            foundation_changed = False
+            dashboard_changed = False
+            install_receipt: dict[str, Any] | None = None
+            foundation_rows: list[dict[str, Any]] = []
+            try:
+                install_manifest = {
+                    "product": "van-gogh2",
+                    "version": package.manifest["component_version"],
+                    "sha256": package.archive_sha256,
+                }
+                install_receipt = self.installer.install_archive(archive, install_manifest)
+                component_changed = True
+                foundation_rows = self._install_foundation_files(release_root, install_receipt["backup_id"])
+                foundation_changed = True
+                if plan.dashboard_changed:
+                    if plan.before is None:
+                        self.ha.save_dashboard(plan.url_path, plan.after, title=plan.title)
+                    else:
+                        self.ha.save_existing_dashboard(plan.url_path, plan.before, plan.after)
+                    dashboard_changed = True
+                generated_manifest_sha = sha256_file(release_root / "release.json")
+                self.installer.annotate_current({
+                    "package_version": package.manifest["package_version"],
+                    "package_schema": package.manifest["schema"],
+                    "foundation_version": package.manifest["foundation"]["version"],
+                    "foundation_release_manifest_sha256": generated_manifest_sha,
+                    "foundation_files": foundation_rows,
+                    "site_manifest_sha256": before_site_sha,
+                    "dashboard_prestate": snapshot,
+                    "dashboard_path": plan.url_path,
+                    "dashboard_state": plan.state,
+                })
+            except Exception:
+                try:
+                    self.ha.restore_dashboard(snapshot)
+                finally:
+                    if foundation_changed and install_receipt is not None:
+                        rollback_receipt = dict(install_receipt)
+                        rollback_receipt["foundation_files"] = foundation_rows
+                        self._restore_foundation_files(rollback_receipt)
+                    if component_changed:
+                        self.installer.rollback()
+                raise
+            after_site_sha = site_manifest_sha256(site_manifest_path)
+            if after_site_sha != before_site_sha:
+                try:
+                    self.ha.restore_dashboard(snapshot)
+                finally:
+                    receipt = json.loads(self.installer.current_receipt.read_text(encoding="utf-8"))
+                    self._restore_foundation_files(receipt)
+                    self.installer.rollback()
+                raise ProductUpdateError("Local site manifest changed during update")
+            return {
+                "operation": "product_update",
+                "state": plan.state,
+                "package_version": package.manifest["package_version"],
+                "component_version": package.manifest["component_version"],
+                "foundation_version": package.manifest["foundation"]["version"],
+                "file_writes": int(component_changed) + 2 * int(foundation_changed),
+                "dashboard_writes": int(dashboard_changed),
+                "site_manifest_writes": 0,
+                "site_manifest_sha256": before_site_sha,
+                "rollback_available": component_changed and foundation_changed,
+            }
+
+    def rollback(self) -> dict[str, Any]:
+        if not self.installer.current_receipt.is_file():
+            raise ProductUpdateError("No product-update receipt is available to roll back")
+        receipt = json.loads(self.installer.current_receipt.read_text(encoding="utf-8"))
+        snapshot = receipt.get("dashboard_prestate")
+        if not isinstance(snapshot, dict):
+            raise ProductUpdateError("Product-update receipt has no dashboard prestate")
+        dashboard_path = receipt.get("dashboard_path")
+        if not isinstance(dashboard_path, str) or not dashboard_path:
+            raise ProductUpdateError("Product-update receipt has no dashboard path")
+        foundation_plan = self._foundation_rollback_plan(receipt)
+        self.installer.rollback_preflight()
+        foundation_stages = self._stage_foundation_rollback(foundation_plan)
+        current_dashboard = self.ha.dashboard_snapshot(dashboard_path)
+        try:
+            dashboard = self.ha.restore_dashboard(snapshot)
+            foundation_restored = self._restore_foundation_files(
+                receipt,
+                foundation_plan,
+                foundation_stages,
+            )
+        except Exception:
+            self._discard_foundation_stages(foundation_stages)
+            try:
+                self.ha.restore_dashboard(current_dashboard)
+            except Exception as recovery_error:
+                raise ProductUpdateError(
+                    "Product rollback failed and dashboard current-state recovery failed"
+                ) from recovery_error
+            raise
+        files = self.installer.rollback()
+        return {
+            "operation": "product_rollback",
+            "dashboard": dashboard,
+            "foundation_files_restored": foundation_restored,
+            "files": files,
+            "readback_verified": bool(dashboard.get("readback_verified")),
+        }

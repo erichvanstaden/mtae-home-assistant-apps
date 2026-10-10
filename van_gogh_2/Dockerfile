@@ -4,7 +4,10 @@ FROM $BUILD_FROM
 WORKDIR /app
 COPY rootfs/app/ /app/
 COPY run.sh /run.sh
-RUN chmod 0755 /run.sh && python3 -m compileall -q /app
+RUN python3 -m pip install --no-cache-dir --break-system-packages \
+        "jsonschema==4.25.1" "PyYAML==6.0.2" \
+    && chmod 0755 /run.sh \
+    && python3 -m compileall -q /app
 
 EXPOSE 8099
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

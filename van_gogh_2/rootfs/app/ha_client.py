@@ -19,8 +19,6 @@ from typing import Any, Callable
 
 DOMAIN = "van_gogh2"
 MODULE_URL = "/van-gogh2-assets/2.0.0-staging.2/van-gogh2.js"
-BUILDER_DASHBOARD_PATH = "van-gogh-builder"
-BUILDER_DASHBOARD_TITLE = "Van Gogh Builder"
 RELEASE_VERSION_PATTERN = re.compile(
     r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
     r"(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?"
@@ -37,20 +35,6 @@ class HARestartPending(HAError):
 
 class HADashboardWriteError(HAError):
     """A dashboard write was submitted but did not produce verified readback."""
-
-
-def builder_dashboard_config() -> dict[str, Any]:
-    """Return the supported first-run Builder entry dashboard."""
-    return {
-        "views": [
-            {
-                "title": "Van Gogh Builder",
-                "path": "builder",
-                "icon": "mdi:palette-outline",
-                "cards": [{"type": "custom:van-gogh-builder-card"}],
-            }
-        ]
-    }
 
 
 def module_url_for_release(release_version: str) -> str:
@@ -655,27 +639,16 @@ class HAClient:
             raise HAError("Review dashboard exact save/readback verification failed")
         return {"created": not before["exists"], "url_path": url_path, "registry": matches[0], "readback_verified": True}
 
-    def ensure_builder_dashboard(self) -> dict[str, Any]:
-        """Create the Builder route once, without overwriting an existing owner dashboard."""
-        before = self.dashboard_snapshot(BUILDER_DASHBOARD_PATH)
-        if before["exists"]:
-            return {
-                "created": False,
-                "url_path": BUILDER_DASHBOARD_PATH,
-                "owner_route": f"/{BUILDER_DASHBOARD_PATH}/builder",
-                "preserved_existing": True,
-                "readback_verified": True,
-            }
-        result = self.save_review_dashboard(
-            BUILDER_DASHBOARD_PATH,
-            builder_dashboard_config(),
-            title=BUILDER_DASHBOARD_TITLE,
-        )
-        return {
-            **result,
-            "owner_route": f"/{BUILDER_DASHBOARD_PATH}/builder",
-            "preserved_existing": False,
-        }
+    def save_dashboard(
+        self,
+        url_path: str,
+        config: dict[str, Any],
+        *,
+        title: str,
+        icon: str = "mdi:palette-outline",
+    ) -> dict[str, Any]:
+        """Create one product dashboard using the verified generic storage writer."""
+        return self.save_review_dashboard(url_path, config, title=title, icon=icon)
 
     def restore_dashboard(self, snapshot: dict[str, Any]) -> dict[str, Any]:
         """Restore the exact dashboard state captured by ``dashboard_snapshot``."""
@@ -722,7 +695,6 @@ class HAClient:
                 for item in self.resources()
                 if _is_van_gogh_resource(item)
             ],
-            "builder_dashboard": self.dashboard_snapshot(BUILDER_DASHBOARD_PATH),
         }
 
     def ensure_config_entry(self) -> dict[str, Any]:
@@ -814,13 +786,11 @@ class HAClient:
         entry = self.ensure_config_entry()
         resource = self.ensure_resource(module_url)
         module = self.probe_module(module_url)
-        builder_dashboard = self.ensure_builder_dashboard()
         return {
             "core_version": config.get("version"),
             "integration": entry,
             "resource": resource,
             "module": module,
-            "builder_dashboard": builder_dashboard,
         }
 
     def restore_resources(self, snapshot: list[dict[str, Any]]) -> dict[str, Any]:
@@ -866,15 +836,8 @@ class HAClient:
         if actual_ids != expected_ids:
             raise HAError("Van Gogh config entry rollback readback did not match prestate")
         resources = self.restore_resources(expected_resources)
-        builder_snapshot = snapshot.get("builder_dashboard")
-        builder_dashboard = (
-            self.restore_dashboard(builder_snapshot)
-            if isinstance(builder_snapshot, dict)
-            else {"restored": False, "reason": "legacy prestate omitted Builder dashboard"}
-        )
         return {
             "config_entry_ids": actual_ids,
             "resources": resources,
-            "builder_dashboard": builder_dashboard,
             "readback_verified": True,
         }

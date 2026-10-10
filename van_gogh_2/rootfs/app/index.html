@@ -61,21 +61,11 @@
   </section>
   <section>
     <h2>Install and recovery</h2>
-    <p>Install/update backs up and writes only Van Gogh-owned surfaces after checksum and archive safety checks, restarts Home Assistant Core, then verifies integration, module and resource readiness. Rollback restores the recorded pre-install Van Gogh state.</p>
+    <p>Install/update validates the shared product package and local site manifest, backs up and writes only Van Gogh-owned surfaces, restarts Home Assistant Core when files changed, then verifies integration, module and resource readiness. Rollback restores the recorded pre-install files and dashboard.</p>
     <div class="actions"><button id="installButton" onclick="installRelease()">Install / update</button><button class="danger" onclick="rollback()">Roll back</button><button class="secondary" onclick="restartHA()">Restart Home Assistant</button></div>
     <div class="marks"><img src="static/mtae-installer.png" alt="MTAE installer icon"><span>MTAE owner-approved artwork</span></div>
   </section>
-  <section>
-    <h2>Home layout schema</h2>
-    <p>Discover the Installer-managed Van Gogh dashboard by product markers and migrate only a recognised four-bay Home layout to the one-parent C1–C8 grid. Local entity bindings, enabled features, other cards and other dashboards are preserved. Unsupported or ambiguous layouts are not written.</p>
-    <div class="actions"><button onclick="migrateHomeSchema()">Migrate Home layout</button><button class="danger" onclick="rollbackHomeSchema()">Restore Home layout prestate</button></div>
-  </section>
-  <section>
-    <h2>Family review dashboard</h2>
-    <p>After staging.6 is installed, choose the approved private dashboard JSON to create or refresh only the separate Family review dashboard. The file is sent to this local Installer and is not published.</p>
-    <label for="reviewFile">Approved dashboard JSON</label><input id="reviewFile" type="file" accept="application/json,.json">
-    <div class="actions"><button onclick="refreshReviewDashboard()">Create / refresh Family review</button><button class="danger" onclick="rollbackReviewDashboard()">Restore review prestate</button></div>
-  </section>
+
 </main>
 <script>
 const output = document.getElementById('output');
@@ -88,15 +78,13 @@ let sessionReleaseChecked = false;
 let lastStatus = null;
 const stageLabels = {
   idle:'Ready', activating:'Activation in progress', checking_release:'Checking the verified release',
-  downloading_release:'Downloading and verifying release', installing_files:'Installing protected files',
+  downloading_release:'Downloading and verifying release', applying_product_update:'Applying the shared product package', installing_files:'Installing protected files',
   requesting_restart:'Requesting Home Assistant Core restart',
   waiting_for_core_stop:'Waiting for Home Assistant Core to stop',
   waiting_for_core_start:'Waiting for Home Assistant Core to start',
   verifying_readiness:'Verifying integration and frontend readiness',
   automatic_rollback:'Readiness failed — restoring the pre-install state',
-  restoring_files:'Restoring protected files', restoring_home_assistant:'Restoring Home Assistant state',
-  discovering_home_schema:'Discovering the supported Van Gogh Home schema', restoring_home_schema:'Restoring the Home layout prestate',
-  saving_review_dashboard:'Saving and verifying the Family review dashboard', restoring_review_dashboard:'Restoring the Family review dashboard',
+  restoring_files:'Restoring protected files and dashboard', restoring_home_assistant:'Restoring Home Assistant state',
   activated:'Activation complete', complete:'Operation complete', restart_pending:'Restart remains pending', failed:'Failed safely'
 };
 function updateButtons(){
@@ -113,7 +101,7 @@ function renderProgress(status){
   if (sessionReleaseChecked) document.getElementById('stageChecked').className='done';
   const stage = status?.operation?.stage;
   const operationName = status?.operation?.operation;
-  if (['downloading_release','installing_files'].includes(stage)) document.getElementById('stageInstalling').className='current';
+  if (['downloading_release','applying_product_update','installing_files'].includes(stage)) document.getElementById('stageInstalling').className='current';
   if (['requesting_restart','waiting_for_core_stop','waiting_for_core_start','restart_pending'].includes(stage)) {
     document.getElementById('stageInstalling').className='done';
     document.getElementById('stageRestarting').className='current';
@@ -171,16 +159,6 @@ async function checkRelease(){ await api('api/check',{},'checking_release'); ses
 async function installRelease(){ if(confirm('Install or update Van Gogh 2 from the verified private release, then restart Home Assistant Core to finish setup?')) await api('api/install',{},'checking_release'); }
 async function rollback(){ if(confirm('Restore the exact state from before the last successful install?')) await api('api/rollback',{confirm:'rollback'},'restoring_files'); }
 async function restartHA(){ if(confirm('Restart Home Assistant now and verify a complete stop/start cycle?')) await api('api/restart',{confirm:'restart'},'requesting_restart'); }
-async function migrateHomeSchema(){ if(confirm('Discover and migrate one supported Van Gogh four-bay Home layout while preserving local configuration?')) await api('api/home-schema/migrate',{confirm:'migrate'},'discovering_home_schema'); }
-async function rollbackHomeSchema(){ if(confirm('Restore the exact Home layout captured before the last successful schema migration?')) await api('api/home-schema/rollback',{confirm:'rollback'},'restoring_home_schema'); }
-async function refreshReviewDashboard(){
-  const file=document.getElementById('reviewFile').files[0];
-  if(!file){ output.textContent='Choose the approved dashboard JSON first.'; return; }
-  const source=JSON.parse(await file.text());
-  const config=source?.data?.config || source?.config || source;
-  if(confirm('Create or refresh only the separate Family review dashboard from this approved file?')) await api('api/review-dashboard',{config},'saving_review_dashboard');
-}
-async function rollbackReviewDashboard(){ if(confirm('Restore the Family review dashboard to its exact pre-refresh state?')) await api('api/review-dashboard/rollback',{confirm:'rollback'},'restoring_review_dashboard'); }
 refresh(true).catch(error => { output.textContent=`Error: ${error.message}`; renderOperation({state:'error',stage:'failed'}); });
 setInterval(() => refresh(false).catch(() => {}), 1000);
 </script>
