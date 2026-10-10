@@ -244,6 +244,7 @@ def _schema_marker(package: ProductPackage, site: dict[str, Any]) -> dict[str, A
         "package_version": package.manifest["package_version"],
         "component_version": package.manifest["component_version"],
         "foundation_version": package.manifest["foundation"]["version"],
+        "site_id": site["site"]["id"],
         "site_schema_version": site["schema_version"],
         "feature_catalogue_version": package.catalogue["catalogue_version"],
         "enabled_features": _enabled_features(site, package),
@@ -375,41 +376,44 @@ def plan_update(
     generated: dict[str, Any],
 ) -> ProductPlan:
     """Create a complete plan; unsupported states never become writes."""
-    product_rows = []
+    target_path = str(site["site"]["id"])
+    if not PATH.fullmatch(target_path):
+        raise ProductUpdateError("Canonical site id cannot be used as a dashboard path")
+    target_rows = []
     for row in inventory:
-        config = row.get("config") if isinstance(row, dict) else None
-        if isinstance(config, dict) and PRODUCT_MARKER in config:
-            marker = config[PRODUCT_MARKER]
-            if not isinstance(marker, dict) or marker.get("schema_version") != PRODUCT_SCHEMA_VERSION:
-                raise ProductUpdateError("Installed dashboard product schema is unsupported")
-            product_rows.append(row)
-    if len(product_rows) > 1:
-        raise ProductUpdateError("Multiple Installer-managed Van Gogh dashboards were discovered")
-    if product_rows:
-        row = product_rows[0]
+        registry = row.get("registry") if isinstance(row, dict) else None
+        if isinstance(registry, dict) and registry.get("url_path") == target_path:
+            target_rows.append(row)
+    if len(target_rows) > 1:
+        raise ProductUpdateError("Multiple dashboards occupy the canonical site path")
+    if target_rows:
+        row = target_rows[0]
         registry = row.get("registry")
         before = row.get("config")
         if not isinstance(registry, dict) or not isinstance(before, dict):
             raise ProductUpdateError("Installed product dashboard snapshot is invalid")
-        path = str(registry.get("url_path") or "")
-        if not PATH.fullmatch(path):
-            raise ProductUpdateError("Installed product dashboard path is invalid")
-        after = _compose_dashboard(generated, before, package, site)
-        return ProductPlan(
-            "current_upgrade",
-            path,
-            str(registry.get("title") or generated.get("title") or site["site"]["title"]),
-            deepcopy(before),
-            after,
-            after != before,
-        )
+        if PRODUCT_MARKER in before:
+            marker = before[PRODUCT_MARKER]
+            if not isinstance(marker, dict) or marker.get("schema_version") != PRODUCT_SCHEMA_VERSION:
+                raise ProductUpdateError("Installed dashboard product schema is unsupported")
+            if marker.get("site_id") not in {None, target_path}:
+                raise ProductUpdateError("Installed dashboard belongs to a different canonical site")
+            after = _compose_dashboard(generated, before, package, site)
+            return ProductPlan(
+                "current_upgrade",
+                target_path,
+                str(registry.get("title") or generated.get("title") or site["site"]["title"]),
+                deepcopy(before),
+                after,
+                after != before,
+            )
     try:
-        existing = discover_dashboard(inventory)
+        existing = discover_dashboard(target_rows)
     except MigrationError as error:
         if str(error) != "No supported Installer-managed Van Gogh dashboard was discovered":
             raise ProductUpdateError(str(error)) from error
         productish = []
-        for row in inventory:
+        for row in target_rows:
             config = row.get("config") if isinstance(row, dict) else None
             if isinstance(config, dict) and any(
                 isinstance(view, dict) and (view.get("type") == HOME_VIEW_TYPE or MANAGED_FOUNDATION in view)
@@ -418,15 +422,7 @@ def plan_update(
                 productish.append(row)
         if productish:
             raise ProductUpdateError("Unsupported Van Gogh dashboard state was discovered")
-        target_path = str(site["site"]["id"])
-        if not PATH.fullmatch(target_path):
-            raise ProductUpdateError("Canonical site id cannot be used as a dashboard path")
-        if any(
-            isinstance(row, dict)
-            and isinstance(row.get("registry"), dict)
-            and row["registry"].get("url_path") == target_path
-            for row in inventory
-        ):
+        if target_rows:
             raise ProductUpdateError("Clean-install dashboard path is already occupied")
         after = _compose_dashboard(generated, None, package, site)
         return ProductPlan("clean_install", target_path, str(generated.get("title") or site["site"]["title"]), None, after, True)

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.1
+
+- Bind dashboard planning to the canonical site ID so a new site installs only at its supplied path and never upgrades an unrelated Installer-managed or legacy Van Gogh dashboard.
+- Persist the canonical site ID in the product marker and reject a conflicting marker at the target path.
+- Add the exact captured staging.8 predecessor regression for clean install, no-op, rollback and identical reinstall containment.
+
 ## 1.2.0
 
 - Install the site-neutral private product package `1.0.0-builder.23-p0.3`, carrying accepted component `2.0.0-builder.23-p0.3`, through the validated local site-manifest contract.

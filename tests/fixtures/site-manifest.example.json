@@ -1,0 +1,124 @@
+{
+  "actions": {
+    "access": {"data": {}, "label": "Access", "operation": "generic", "service": "script.turn_on", "target": "access_control"},
+    "all_lights_off": {"data": {}, "label": "All Off", "operation": "generic", "service": "light.turn_off", "target": "studio_light"},
+    "apply_mood": {"data": {"slot": 1}, "label": "Mood", "operation": "apply", "service": "script.turn_on", "target": "lighting_moods"},
+    "close_living_tis": {"data": {}, "label": "Close", "operation": "close", "service": "cover.close_cover", "target": "living_tis_blind"},
+    "delete_mood": {"data": {}, "label": "Delete Mood", "operation": "delete", "service": "script.turn_on", "target": "lighting_moods"},
+    "intercom_dnd": {"data": {}, "label": "Intercom DND", "operation": "generic", "service": "script.turn_on", "target": "intercom_dnd"},
+    "open_bedroom_shelly": {"data": {}, "label": "Open", "operation": "open", "service": "cover.open_cover", "target": "bedroom_shelly_blind"},
+    "open_living_tis": {"data": {}, "label": "Open", "operation": "open", "service": "cover.open_cover", "target": "living_tis_blind"},
+    "save_climate_schedule": {"data": {}, "label": "Save Schedule", "operation": "set-schedule", "service": "script.turn_on", "target": "studio_climate"},
+    "save_mood": {"data": {}, "label": "Save Mood", "operation": "save", "service": "script.turn_on", "target": "lighting_moods"},
+    "set_bedroom_shelly_position": {"data": {}, "label": "Position", "operation": "set-position", "service": "cover.set_cover_position", "target": "bedroom_shelly_blind"},
+    "set_climate_away": {"data": {"hvac_mode": "off"}, "label": "Climate", "operation": "generic", "service": "climate.set_hvac_mode", "target": "studio_climate"},
+    "set_climate_target": {"data": {}, "label": "Target", "operation": "set-target", "service": "climate.set_temperature", "target": "studio_climate"},
+    "set_studio_light": {"data": {}, "label": "Brightness", "operation": "set-level", "service": "light.turn_on", "target": "studio_light"},
+    "security": {"data": {}, "label": "Security", "operation": "generic", "service": "script.turn_on", "target": "security_control"},
+    "toggle_studio_light": {"data": {}, "label": "Studio Light", "operation": "toggle", "service": "light.toggle", "target": "studio_light"}
+  },
+  "bindings": {
+    "bedroom_shelly_blind": {
+      "adapter": {"aggregate_operation": "not-applicable", "calibrated": true, "commissioning": "physical-verified", "control": "shelly-cover", "id": "shelly-cover-position-v1", "percentage_control": true, "state_semantics": "measured-position"},
+      "capability": "cover-shelly",
+      "entity_id": "cover.neutral_bedroom_shelly",
+      "room": "bedroom",
+      "services": ["cover.close_cover", "cover.open_cover", "cover.set_cover_position"],
+      "source": "neutral physical-calibration receipt",
+      "verified": true
+    },
+    "entry_camera": {
+      "adapter": {"commissioning": "synthetic-verified", "control": "button", "id": "ha-button-v1", "state_semantics": "measured"},
+      "capability": "camera",
+      "entity_id": "camera.neutral_entry",
+      "services": ["camera.enable_motion_detection"],
+      "source": "neutral fixture export",
+      "verified": true
+    },
+    "lighting_moods": {
+      "adapter": {"aggregate_operation": "not-applicable", "commissioning": "synthetic-verified", "control": "mood-manager", "id": "ha-lighting-mood-manager-v1", "state_semantics": "stored-scene"},
+      "capability": "lighting-mood",
+      "entity_id": "script.neutral_lighting_moods",
+      "services": ["script.turn_on"],
+      "source": "neutral fixture export",
+      "verified": true
+    },
+    "living_tis_blind": {
+      "adapter": {"aggregate_operation": "serial-individual", "commissioning": "physical-verified", "control": "tis-cover", "id": "tis-cover-command-v1", "percentage_control": false, "state_semantics": "commanded-open-close"},
+      "capability": "cover-tis",
+      "entity_id": "cover.neutral_living_tis",
+      "room": "living",
+      "services": ["cover.close_cover", "cover.open_cover"],
+      "source": "neutral command-path receipt",
+      "verified": true
+    },
+    "access_control": {
+      "adapter": {"commissioning": "synthetic-verified", "control": "button", "id": "ha-button-v1", "state_semantics": "measured"},
+      "capability": "alarm",
+      "entity_id": "script.neutral_access_control",
+      "room": "entry",
+      "services": ["script.turn_on"],
+      "source": "neutral fixture export",
+      "verified": true
+    },
+    "intercom_dnd": {
+      "adapter": {"commissioning": "synthetic-verified", "control": "button", "id": "ha-button-v1", "state_semantics": "measured"},
+      "capability": "alarm",
+      "entity_id": "script.neutral_intercom_dnd",
+      "room": "entry",
+      "services": ["script.turn_on"],
+      "source": "neutral fixture export",
+      "verified": true
+    },
+    "security_control": {
+      "adapter": {"commissioning": "synthetic-verified", "control": "button", "id": "ha-button-v1", "state_semantics": "measured"},
+      "capability": "alarm",
+      "entity_id": "script.neutral_security_control",
+      "room": "entry",
+      "services": ["script.turn_on"],
+      "source": "neutral fixture export",
+      "verified": true
+    },
+    "pending_power": {
+      "adapter": {"commissioning": "unverified", "control": "button", "id": "ha-button-v1", "state_semantics": "unknown"},
+      "capability": "power",
+      "services": [],
+      "source": "pending field verification",
+      "verified": false
+    },
+    "studio_climate": {
+      "adapter": {"aggregate_operation": "not-applicable", "commissioning": "synthetic-verified", "control": "climate-dial", "history_driver": "climate.neutral_studio", "id": "ha-climate-dial-v1", "state_semantics": "current-and-target", "zone_entities": ["climate.neutral_studio_zone"]},
+      "capability": "ac-zone",
+      "entity_id": "climate.neutral_studio",
+      "room": "studio",
+      "services": ["climate.set_hvac_mode", "climate.set_temperature", "script.turn_on"],
+      "source": "neutral fixture export",
+      "verified": true
+    },
+    "studio_light": {
+      "adapter": {"aggregate_operation": "not-applicable", "commissioning": "synthetic-verified", "control": "dimmer", "id": "ha-light-dimmer-v1", "state_semantics": "measured-brightness"},
+      "capability": "light",
+      "entity_id": "light.neutral_studio",
+      "room": "studio",
+      "services": ["light.toggle", "light.turn_off", "light.turn_on"],
+      "source": "neutral fixture export",
+      "verified": true
+    }
+  },
+  "content": {
+    "ac_zones": ["studio_climate"],
+    "irrigation": [],
+    "lights": ["studio_light"],
+    "media": [],
+    "moods": ["lighting_moods"],
+    "power": ["pending_power"],
+    "security": ["entry_camera", "intercom_dnd", "access_control", "security_control"],
+    "windows": ["bedroom_shelly_blind", "living_tis_blind"]
+  },
+  "features": {"climate": true, "irrigation": false, "lights": true, "media": false, "power": true, "security": true},
+  "panel": {"display_mode": "ha-shell", "id": "neutral-wall10", "profile": "wall-10", "type": "wall"},
+  "quick_actions": ["all_lights_off", "intercom_dnd", "access", "security"],
+  "rooms": [{"id": "bedroom", "name": "Bedroom"}, {"id": "entry", "name": "Entry"}, {"id": "living", "name": "Living"}, {"id": "studio", "name": "Studio"}],
+  "schema_version": 1,
+  "site": {"id": "clean-room-site", "title": "Clean Room Home"}
+}

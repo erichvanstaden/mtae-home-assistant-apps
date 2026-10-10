@@ -1,0 +1,35 @@
+{
+  "actions": {},
+  "bindings": {},
+  "content": {
+    "ac_zones": [],
+    "irrigation": [],
+    "lights": [],
+    "media": [],
+    "moods": [],
+    "power": [],
+    "security": [],
+    "windows": []
+  },
+  "features": {
+    "climate": false,
+    "irrigation": false,
+    "lights": false,
+    "media": false,
+    "power": false,
+    "security": false
+  },
+  "panel": {
+    "display_mode": "ha-shell",
+    "id": "builder23-canary-wall10-panel",
+    "profile": "wall-10",
+    "type": "wall"
+  },
+  "quick_actions": [],
+  "rooms": [],
+  "schema_version": 1,
+  "site": {
+    "id": "builder23-canary-wall10",
+    "title": "Builder.23 Canary Wall 10"
+  }
+}

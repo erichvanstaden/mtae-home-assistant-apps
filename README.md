@@ -19,7 +19,7 @@ This repository contains the **MTAE Van Gogh Installer** application shell. It d
 4. Install **MTAE Van Gogh Installer**.
 5. Start the app and open its Web UI.
 6. Enter the one-time MTAE Install Code supplied through the authorised MTAE channel, then select **Activate site**. The permanent HTTPS endpoint is built into the App.
-7. Ensure the commissioned site manifest exists at `/config/van_gogh2-site.json`, then select **Check release** and **Install / update**. Installer `1.2.0` accepts the private product package `1.0.0-builder.23-p0.3`, carrying component `2.0.0-builder.23-p0.3`, only when its pinned identity and the local site manifest both validate.
+7. Ensure the commissioned site manifest exists at `/config/van_gogh2-site.json`, then select **Check release** and **Install / update**. Installer `1.2.1` accepts the private product package `1.0.0-builder.23-p0.3`, carrying component `2.0.0-builder.23-p0.3`, only when its pinned identity and the local site manifest both validate.
 
 ## What the Installer does
 

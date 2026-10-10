@@ -25,7 +25,7 @@ OPERATION_LOCK = threading.Lock()
 DEFAULT_RELEASE_ENDPOINT = os.environ.get(
     "VAN_GOGH_RELEASE_ENDPOINT", "https://installer.mtae.com.au"
 ).rstrip("/")
-INSTALLER_VERSION = "1.2.0"
+INSTALLER_VERSION = "1.2.1"
 PRODUCT_PACKAGE_SCHEMA = "mtae.van-gogh.product-package.v1"
 
 
