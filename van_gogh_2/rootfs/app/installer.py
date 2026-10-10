@@ -115,9 +115,13 @@ def safe_extract(archive: Path, destination: Path) -> None:
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    os.chmod(temporary, 0o600)
-    os.replace(temporary, path)
+    try:
+        temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 class ReleaseClient:
@@ -467,11 +471,19 @@ class InstallManager:
             "target": str(self.target),
         }
         operation_receipt = self.operations / f"{now}-rollback.json"
+        if operation_receipt.exists():
+            operation_receipt = self.operations / f"{now}-{uuid.uuid4().hex}-rollback.json"
+        operations_existed = self.operations.exists()
         try:
             _write_json_atomic(operation_receipt, receipt)
             self.current_receipt.unlink()
         except Exception:
             operation_receipt.unlink(missing_ok=True)
+            if not operations_existed:
+                try:
+                    self.operations.rmdir()
+                except OSError:
+                    pass
             raise
         shutil.rmtree(transaction["displaced"], ignore_errors=True)
         shutil.rmtree(transaction["stage"], ignore_errors=True)

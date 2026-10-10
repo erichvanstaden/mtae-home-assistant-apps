@@ -574,10 +574,32 @@ class ProductUpdateManager:
     ) -> int:
         plan = plan if plan is not None else self._foundation_rollback_plan(receipt)
         stages = stages if stages is not None else self._stage_foundation_rollback(plan)
+        transaction = self._apply_staged_foundation_rollback(plan, stages)
+        self._finalize_staged_foundation_rollback(transaction)
+        return int(transaction["restored"])
+
+    def _apply_staged_foundation_rollback(
+        self,
+        plan: list[tuple[str, Path, Path | None]],
+        stages: dict[str, Path | None],
+    ) -> dict[str, Any]:
+        """Apply staged predecessors while retaining exact current-state recovery."""
+        transaction: dict[str, Any] = {
+            "stages": stages,
+            "swaps": [],
+            "moved_targets": set(),
+            "installed_targets": set(),
+            "restored": 0,
+            "applied": False,
+            "committed": False,
+        }
         restored = 0
         swaps: list[tuple[Path, Path | None, Path]] = []
         moved_targets: set[Path] = set()
         installed_targets: set[Path] = set()
+        transaction["swaps"] = swaps
+        transaction["moved_targets"] = moved_targets
+        transaction["installed_targets"] = installed_targets
         try:
             for key, target, _source in reversed(plan):
                 stage = stages[key]
@@ -591,29 +613,51 @@ class ProductUpdateManager:
                     os.replace(stage, target)
                     installed_targets.add(target)
                 restored += 1
-        except Exception as error:
-            recovery_errors: list[str] = []
-            for target, stage, displaced in reversed(swaps):
-                try:
-                    if target in installed_targets or target in moved_targets:
-                        self._remove_foundation_path(target)
-                    if target in moved_targets and (displaced.exists() or displaced.is_symlink()):
-                        os.replace(displaced, target)
-                    self._remove_foundation_path(stage)
-                    self._remove_foundation_path(displaced)
-                except Exception as recovery_error:
-                    recovery_errors.append(str(recovery_error))
-            self._discard_foundation_stages(stages)
-            if recovery_errors:
+        except Exception:
+            try:
+                self._recover_staged_foundation_rollback(transaction)
+            except Exception as recovery_error:
                 raise ProductUpdateError(
-                    "Foundation rollback swap failed and current-state recovery failed: "
-                    + "; ".join(recovery_errors)
-                ) from error
+                    "Foundation rollback swap failed and current-state recovery failed"
+                ) from recovery_error
             raise
-        for _target, _stage, displaced in swaps:
-            self._remove_foundation_path(displaced)
-        self._discard_foundation_stages(stages)
-        return restored
+        transaction["restored"] = restored
+        transaction["applied"] = True
+        return transaction
+
+    def _recover_staged_foundation_rollback(self, transaction: dict[str, Any]) -> None:
+        """Restore current Foundation trees retained by an uncommitted rollback."""
+        if transaction["committed"]:
+            raise ProductUpdateError("Committed Foundation rollback cannot be recovered")
+        recovery_errors: list[str] = []
+        moved_targets = transaction["moved_targets"]
+        installed_targets = transaction["installed_targets"]
+        for target, stage, displaced in reversed(transaction["swaps"]):
+            try:
+                if target in installed_targets or target in moved_targets:
+                    self._remove_foundation_path(target)
+                if target in moved_targets and (displaced.exists() or displaced.is_symlink()):
+                    os.replace(displaced, target)
+                self._remove_foundation_path(stage)
+                self._remove_foundation_path(displaced)
+            except Exception as recovery_error:
+                recovery_errors.append(str(recovery_error))
+        self._discard_foundation_stages(transaction["stages"])
+        transaction["applied"] = False
+        if recovery_errors:
+            raise ProductUpdateError(
+                "Foundation current-state recovery failed: " + "; ".join(recovery_errors)
+            )
+
+    def _finalize_staged_foundation_rollback(self, transaction: dict[str, Any]) -> None:
+        """Release retained Foundation current state after product commit succeeds."""
+        for _target, _stage, displaced in transaction["swaps"]:
+            try:
+                self._remove_foundation_path(displaced)
+            except OSError:
+                pass
+        self._discard_foundation_stages(transaction["stages"])
+        transaction["committed"] = True
 
     @staticmethod
     def _remove_foundation_path(path: Path | None) -> None:
@@ -785,31 +829,40 @@ class ProductUpdateManager:
             self._discard_foundation_stages(foundation_stages)
             raise
         current_dashboard = self.ha.dashboard_snapshot(dashboard_path)
+        foundation_transaction: dict[str, Any] | None = None
         try:
             self.installer.apply_staged_rollback(component_transaction)
             dashboard = self.ha.restore_dashboard(snapshot)
-            foundation_restored = self._restore_foundation_files(
-                receipt,
+            foundation_transaction = self._apply_staged_foundation_rollback(
                 foundation_plan,
                 foundation_stages,
             )
+            foundation_restored = int(foundation_transaction["restored"])
+            files = self.installer.commit_staged_rollback(component_transaction)
+            self._finalize_staged_foundation_rollback(foundation_transaction)
         except Exception:
-            self._discard_foundation_stages(foundation_stages)
-            recovery_error: Exception | None = None
+            recovery_errors: list[Exception] = []
+            if foundation_transaction is not None and not foundation_transaction["committed"]:
+                try:
+                    self._recover_staged_foundation_rollback(foundation_transaction)
+                except Exception as caught:
+                    recovery_errors.append(caught)
+            else:
+                self._discard_foundation_stages(foundation_stages)
             try:
                 self.ha.restore_dashboard(current_dashboard)
             except Exception as caught:
-                recovery_error = caught
-            try:
-                self.installer.discard_staged_rollback(component_transaction)
-            except Exception as caught:
-                recovery_error = recovery_error or caught
-            if recovery_error is not None:
+                recovery_errors.append(caught)
+            if not component_transaction["committed"]:
+                try:
+                    self.installer.discard_staged_rollback(component_transaction)
+                except Exception as caught:
+                    recovery_errors.append(caught)
+            if recovery_errors:
                 raise ProductUpdateError(
                     "Product rollback failed and current-state recovery failed"
-                ) from recovery_error
+                ) from recovery_errors[0]
             raise
-        files = self.installer.commit_staged_rollback(component_transaction)
         return {
             "operation": "product_rollback",
             "dashboard": dashboard,

@@ -130,6 +130,7 @@ class ProductRollbackTransactionTests(unittest.TestCase):
                 for key, relative in FOUNDATION_TARGETS.items()
             },
             "receipt": file_sha(install.current_receipt) if install.current_receipt.is_file() else None,
+            "operations": tree_snapshot(install.operations),
             "debris": sorted(
                 path.relative_to(install.config_root).as_posix()
                 for path in install.config_root.rglob("*")
@@ -167,6 +168,52 @@ class ProductRollbackTransactionTests(unittest.TestCase):
 
         with patch("installer.os.replace", side_effect=fail_component_swap):
             with self.assertRaisesRegex(OSError, "synthetic component rollback swap failure"):
+                self.manager.rollback()
+
+        self.assertEqual(self.snapshot_all(), before)
+
+    def test_operation_receipt_write_failure_preserves_exact_current_state(self) -> None:
+        before = self.snapshot_all()
+        operations = self.manager.installer.operations
+        real_replace = os.replace
+
+        def fail_operation_receipt_replace(source: Path, destination: Path):
+            destination = Path(destination)
+            if destination.parent == operations and destination.name.endswith("-rollback.json"):
+                raise OSError("synthetic rollback operation receipt write failure")
+            return real_replace(source, destination)
+
+        with patch("installer.os.replace", side_effect=fail_operation_receipt_replace):
+            with self.assertRaisesRegex(
+                OSError,
+                "synthetic rollback operation receipt write failure",
+            ):
+                self.manager.rollback()
+
+        self.assertEqual(self.snapshot_all(), before)
+
+    def test_current_receipt_unlink_failure_preserves_exact_current_state(self) -> None:
+        now = "20260102T030405Z"
+        operations = self.manager.installer.operations
+        operations.mkdir(parents=True)
+        (operations / f"{now}-rollback.json").write_bytes(b'{"existing":true}\n')
+        before = self.snapshot_all()
+        current_receipt = self.manager.installer.current_receipt
+        real_unlink = Path.unlink
+
+        def fail_current_receipt_unlink(path: Path, *args, **kwargs):
+            if path == current_receipt:
+                raise OSError("synthetic rollback current receipt unlink failure")
+            return real_unlink(path, *args, **kwargs)
+
+        with patch("installer.time.strftime", return_value=now), patch(
+            "pathlib.Path.unlink",
+            new=fail_current_receipt_unlink,
+        ):
+            with self.assertRaisesRegex(
+                OSError,
+                "synthetic rollback current receipt unlink failure",
+            ):
                 self.manager.rollback()
 
         self.assertEqual(self.snapshot_all(), before)
