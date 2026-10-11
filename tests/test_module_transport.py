@@ -14,6 +14,21 @@ from ha_client import HAClient  # noqa: E402
 
 
 class TestDirectCoreModuleTransport(unittest.TestCase):
+    def test_environment_supports_isolated_supervisor_port(self) -> None:
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "SUPERVISOR_TOKEN": "test-token",
+                "SUPERVISOR_HOST": "127.0.0.1",
+                "SUPERVISOR_PORT": "18220",
+            },
+            clear=True,
+        ):
+            client = HAClient.from_environment()
+        self.assertIsNotNone(client)
+        self.assertEqual(client.host, "127.0.0.1")
+        self.assertEqual(client.port, 18220)
+
     def test_module_probe_bypasses_ambient_http_proxy(self) -> None:
         """The private Supervisor Core origin must never use process proxy settings."""
         client = HAClient(token="test-token", host="supervisor")

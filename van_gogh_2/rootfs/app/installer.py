@@ -132,12 +132,27 @@ class ReleaseClient:
         self.credential = credential
 
     @classmethod
-    def activate(cls, endpoint: str, install_code: str) -> dict[str, str]:
+    def activate(
+        cls,
+        endpoint: str,
+        install_code: str,
+        channel: str = "production",
+        profile: str = "wall-10",
+    ) -> dict[str, Any]:
         endpoint = _normalise_endpoint(endpoint)
         install_code = install_code.strip()
         if not install_code:
             raise InstallError("MTAE Install Code is required")
-        body = json.dumps({"install_code": install_code}).encode("utf-8")
+        channel = channel.strip().lower()
+        if channel not in {"production", "staging"}:
+            raise InstallError("Release channel must be production or staging")
+        if profile not in {"wall-10", "mobile/app"}:
+            raise InstallError("Starter profile must be Wall-10 or Mobile")
+        body = json.dumps({
+            "install_code": install_code,
+            "channel": channel,
+            "profile": profile,
+        }).encode("utf-8")
         request = urllib.request.Request(
             urllib.parse.urljoin(endpoint + "/", "api/v1/activate"),
             method="POST",
@@ -167,6 +182,9 @@ class ReleaseClient:
             "credential": credential,
             "site_id": site_id,
             "site_name": str(result.get("site_label") or "Van Gogh site"),
+            "channel": str(result.get("channel") or channel),
+            "profile": str(result.get("profile") or profile),
+            "site_manifest": result.get("site_manifest"),
         }
 
     def _request(self, path_or_url: str) -> urllib.request.Request:
@@ -215,6 +233,7 @@ class ReleaseClient:
             "component_version",
             "foundation_version",
             "package_schema",
+            "module_url",
         ):
             if isinstance(manifest.get(key), str):
                 result[key] = manifest[key]
@@ -253,6 +272,7 @@ class InstallManager:
         self.backups = self.state_root / "backups"
         self.current_receipt = self.state_root / "current.json"
         self.operations = self.state_root / "operations"
+        self._pending_install: dict[str, Any] | None = None
 
     def installed_version(self) -> str | None:
         manifest = self.target / "manifest.json"
@@ -278,12 +298,19 @@ class InstallManager:
             raise InstallError("Integration manifest domain is not van_gogh2")
         if manifest.get("version") != expected_version:
             raise InstallError("Integration version does not match the release manifest")
-        frontend = source / "frontend" / expected_version / "van-gogh2.js"
-        if not frontend.is_file():
-            raise InstallError("Integration does not contain the versioned frontend module")
+        embedded_frontend = source / "frontend" / expected_version / "van-gogh2.js"
+        managed_frontends = sorted((extracted / "www" / "van-gogh2").glob("*/van-gogh2.js"))
+        if not embedded_frontend.is_file() and len(managed_frontends) != 1:
+            raise InstallError("Archive does not contain exactly one managed frontend module")
         return source
 
-    def install_archive(self, archive: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    def install_archive(
+        self,
+        archive: Path,
+        manifest: dict[str, Any],
+        *,
+        defer_commit: bool = False,
+    ) -> dict[str, Any]:
         actual_sha = sha256_file(archive)
         if actual_sha != manifest["sha256"]:
             raise InstallError("Archive SHA-256 does not match the release manifest")
@@ -291,58 +318,191 @@ class InstallManager:
             extracted = Path(temporary)
             safe_extract(archive, extracted)
             source = self._source_component(extracted, manifest["version"])
-            return self._install_component(source, manifest, actual_sha)
+            return self._install_component(
+                source,
+                manifest,
+                actual_sha,
+                defer_commit=defer_commit,
+            )
 
     def _install_component(
-        self, source: Path, manifest: dict[str, Any], archive_sha256: str
+        self,
+        source: Path,
+        manifest: dict[str, Any],
+        archive_sha256: str,
+        *,
+        defer_commit: bool = False,
     ) -> dict[str, Any]:
+        if self._pending_install is not None:
+            raise InstallError("A previous install transaction is still pending")
         now = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         backup_id = f"{now}-{uuid.uuid4().hex[:8]}"
         backup = self.backups / backup_id
-        backup.mkdir(parents=True, exist_ok=False)
         previous_present = self.target.is_dir()
-        if previous_present:
-            shutil.copytree(self.target, backup / COMPONENT)
         previous_version = self.installed_version()
+        operation_receipt = self.operations / f"{now}-install.json"
+        if operation_receipt.exists():
+            operation_receipt = self.operations / f"{now}-{uuid.uuid4().hex}-install.json"
+        transaction: dict[str, Any] = {
+            "backup": backup,
+            "backup_created": False,
+            "backups_existed": self.backups.exists(),
+            "config_root_existed": self.config_root.exists(),
+            "current_bytes": (
+                self.current_receipt.read_bytes() if self.current_receipt.is_file() else None
+            ),
+            "current_mode": (
+                self.current_receipt.stat().st_mode & 0o777
+                if self.current_receipt.is_file()
+                else None
+            ),
+            "displaced": self.target.parent / f".{COMPONENT}.old.{uuid.uuid4().hex}",
+            "installed_new": False,
+            "moved_old": False,
+            "operation_bytes": (
+                operation_receipt.read_bytes() if operation_receipt.is_file() else None
+            ),
+            "operation_mode": (
+                operation_receipt.stat().st_mode & 0o777
+                if operation_receipt.is_file()
+                else None
+            ),
+            "operation_receipt": operation_receipt,
+            "operations_existed": self.operations.exists(),
+            "previous_present": previous_present,
+            "stage": self.target.parent / f".{COMPONENT}.new.{uuid.uuid4().hex}",
+            "state_root_existed": self.state_root.exists(),
+            "target_parent_existed": self.target.parent.exists(),
+        }
         backup_receipt = {
             "backup_id": backup_id,
             "created_utc": now,
             "previous_present": previous_present,
             "previous_version": previous_version,
         }
-        _write_json_atomic(backup / "receipt.json", backup_receipt)
-
-        self.target.parent.mkdir(parents=True, exist_ok=True)
-        stage = self.target.parent / f".{COMPONENT}.new.{uuid.uuid4().hex}"
-        displaced = self.target.parent / f".{COMPONENT}.old.{uuid.uuid4().hex}"
-        shutil.copytree(source, stage)
-        moved_old = False
         try:
-            if self.target.exists():
-                os.replace(self.target, displaced)
-                moved_old = True
-            os.replace(stage, self.target)
-        except Exception:
-            if self.target.exists():
-                shutil.rmtree(self.target, ignore_errors=True)
-            if moved_old and displaced.exists():
-                os.replace(displaced, self.target)
-            shutil.rmtree(stage, ignore_errors=True)
-            raise
-        shutil.rmtree(displaced, ignore_errors=True)
+            backup.mkdir(parents=True, exist_ok=False)
+            transaction["backup_created"] = True
+            if previous_present:
+                shutil.copytree(self.target, backup / COMPONENT)
+            _write_json_atomic(backup / "receipt.json", backup_receipt)
 
-        receipt = {
-            **backup_receipt,
-            "operation": "install",
-            "product": PRODUCT,
-            "installed_version": manifest["version"],
-            "archive_sha256": archive_sha256,
-            "restart_required": True,
-            "target": str(self.target),
-        }
-        _write_json_atomic(self.current_receipt, receipt)
-        _write_json_atomic(self.operations / f"{now}-install.json", receipt)
+            self.target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(source, transaction["stage"])
+            if self.target.exists():
+                os.replace(self.target, transaction["displaced"])
+                transaction["moved_old"] = True
+            os.replace(transaction["stage"], self.target)
+            transaction["installed_new"] = True
+
+            receipt = {
+                **backup_receipt,
+                "operation": "install",
+                "product": PRODUCT,
+                "installed_version": manifest["version"],
+                "archive_sha256": archive_sha256,
+                "restart_required": True,
+                "target": str(self.target),
+            }
+            _write_json_atomic(self.current_receipt, receipt)
+            _write_json_atomic(operation_receipt, receipt)
+        except Exception as error:
+            try:
+                self._recover_install_transaction(transaction)
+            except Exception as recovery_error:
+                raise InstallError(
+                    "Install transaction failed and exact prestate recovery failed"
+                ) from recovery_error
+            raise error
+
+        shutil.rmtree(transaction["displaced"], ignore_errors=True)
+        transaction["moved_old"] = False
+        if defer_commit:
+            self._pending_install = transaction
+        else:
+            transaction["committed"] = True
         return receipt
+
+    @staticmethod
+    def _restore_file(path: Path, content: bytes | None, mode: int | None) -> None:
+        if content is None:
+            path.unlink(missing_ok=True)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.restore")
+        try:
+            temporary.write_bytes(content)
+            os.chmod(temporary, mode if mode is not None else 0o600)
+            os.replace(temporary, path)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+
+    @staticmethod
+    def _remove_if_new_and_empty(path: Path, existed: bool) -> None:
+        if existed:
+            return
+        try:
+            path.rmdir()
+        except OSError:
+            pass
+
+    def _recover_install_transaction(self, transaction: dict[str, Any]) -> None:
+        """Restore the byte-visible component and receipt prestate for a failed install."""
+        if transaction.get("installed_new") and self.target.exists():
+            shutil.rmtree(self.target)
+        displaced = transaction["displaced"]
+        backup = transaction["backup"]
+        if transaction.get("previous_present"):
+            if displaced.exists():
+                os.replace(displaced, self.target)
+            else:
+                source = backup / COMPONENT
+                if not source.is_dir():
+                    raise InstallError("Install recovery backup is missing")
+                self.target.parent.mkdir(parents=True, exist_ok=True)
+                restore = self.target.parent / f".{COMPONENT}.restore.{uuid.uuid4().hex}"
+                try:
+                    shutil.copytree(source, restore)
+                    os.replace(restore, self.target)
+                except Exception:
+                    shutil.rmtree(restore, ignore_errors=True)
+                    raise
+        shutil.rmtree(transaction["stage"], ignore_errors=True)
+        shutil.rmtree(displaced, ignore_errors=True)
+        self._restore_file(
+            transaction["operation_receipt"],
+            transaction["operation_bytes"],
+            transaction["operation_mode"],
+        )
+        self._restore_file(
+            self.current_receipt,
+            transaction["current_bytes"],
+            transaction["current_mode"],
+        )
+        if transaction.get("backup_created"):
+            shutil.rmtree(backup)
+        self._remove_if_new_and_empty(self.operations, transaction["operations_existed"])
+        self._remove_if_new_and_empty(self.backups, transaction["backups_existed"])
+        self._remove_if_new_and_empty(self.state_root, transaction["state_root_existed"])
+        self._remove_if_new_and_empty(self.target.parent, transaction["target_parent_existed"])
+        self._remove_if_new_and_empty(self.config_root, transaction["config_root_existed"])
+        transaction["recovered"] = True
+        if self._pending_install is transaction:
+            self._pending_install = None
+
+    def commit_pending_install(self) -> None:
+        """Commit a deferred install after every enclosing finalisation step succeeds."""
+        if self._pending_install is None:
+            raise InstallError("No install transaction is pending")
+        self._pending_install["committed"] = True
+        self._pending_install = None
+
+    def recover_pending_install(self) -> None:
+        """Recover the exact pre-call state of a deferred install."""
+        if self._pending_install is None:
+            raise InstallError("No install transaction is pending")
+        self._recover_install_transaction(self._pending_install)
 
     def annotate_current(self, fields: dict[str, Any]) -> dict[str, Any]:
         """Persist post-copy prestate/readiness without weakening the original receipt."""

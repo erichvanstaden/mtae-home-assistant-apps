@@ -27,6 +27,7 @@ CATALOGUE_SCHEMA = "mtae.van-gogh.feature-catalogue.v1"
 PRODUCT_SCHEMA_VERSION = 2
 FOUNDATION_BUNDLE_ID = "van-gogh-foundation-site-neutral"
 FOUNDATION_VERSION = "1.5.0"
+FRONTEND_VERSION = "2.0.0-suite.1"
 SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?$")
 PATH = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 SECRET_WORDS = re.compile(r"(?:password|secret|token|credential|api[_-]?key|install[_-]?code)", re.I)
@@ -34,6 +35,7 @@ PRODUCT_MARKER = "van_gogh_product"
 MANAGED_FOUNDATION = "van_gogh_managed_foundation"
 FOUNDATION_TARGETS = {
     "assets": Path("www") / "van-gogh" / FOUNDATION_VERSION,
+    "frontend": Path("www") / "van-gogh2" / FRONTEND_VERSION,
     "owner_maintenance": Path("custom_components") / "mtae_owner_maintenance",
 }
 
@@ -261,12 +263,38 @@ def build_foundation_release(
     release_root = workspace / "foundation-release"
     safe_extract(package.archive, extracted)
     foundation_root = extracted / package.manifest["foundation"]["root"]
+    site = json.loads(site_manifest_path.read_text(encoding="utf-8"))
+    profile = site.get("panel", {}).get("profile")
+    target_profile_starters = {
+        "wall-10": "wall-10-dashboard.json",
+        "mobile/app": "mobile-app-dashboard.json",
+    }
+    if profile not in target_profile_starters:
+        raise ProductUpdateError(f"Unsupported target profile: {profile}")
+    generator_manifest = site_manifest_path.resolve()
+    if profile == "mobile/app":
+        # Foundation v1 deliberately has no mobile renderer.  Use an equivalent
+        # wall manifest only to generate shared assets/contracts; the frozen
+        # Builder.22 target-profile starter supplies the dashboard below.
+        foundation_site = deepcopy(site)
+        foundation_site["panel"] = {
+            **foundation_site["panel"],
+            "id": f"{foundation_site['panel']['id']}-foundation",
+            "type": "wall",
+            "profile": "wall-10",
+            "display_mode": "ha-shell",
+        }
+        generator_manifest = workspace / "mobile-foundation-input.json"
+        generator_manifest.write_text(
+            json.dumps(foundation_site, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
     command = [
         sys.executable,
         "-m",
         "van_gogh.tools.cli",
         "build",
-        str(site_manifest_path.resolve()),
+        str(generator_manifest),
         "--output",
         str(release_root),
     ]
@@ -286,6 +314,61 @@ def build_foundation_release(
         detail = (completed.stderr or completed.stdout).strip().splitlines()
         safe_detail = detail[-1][:300] if detail else "unknown generator failure"
         raise ProductUpdateError(f"Canonical Foundation generator rejected the site manifest: {safe_detail}")
+    starter = extracted / "starter" / target_profile_starters[profile]
+    contract_path = extracted / "starter" / "PROFILE-ADAPTER-CONTRACT.json"
+    try:
+        dashboard = json.loads(starter.read_text(encoding="utf-8"))
+        adapter_contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        profile_contract = adapter_contract["profiles"][profile]
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as error:
+        raise ProductUpdateError(
+            f"Builder.22 package has no valid neutral {profile} starter contract"
+        ) from error
+    routes = [view.get("path") for view in dashboard.get("views", [])]
+    if (
+        adapter_contract.get("schema") != "mtae.van-gogh.neutral-target-profile-adapter.v1"
+        or routes != profile_contract.get("routes")
+        or dashboard.get("mtae_profile", {}).get("id") != profile_contract.get("profile_id")
+    ):
+        raise ProductUpdateError(f"Builder.22 neutral {profile} starter failed its profile contract")
+
+    site_id = str(site["site"]["id"])
+    site_title = str(site["site"]["title"])
+    replacements = {
+        "neutral-target": site_id,
+        "van-gogh": site_id,
+        "Van Gogh": site_title,
+        "starter-v1:neutral-target": f"starter-v1:{site_id}",
+    }
+
+    def replace_starter_identity(value: Any) -> Any:
+        if isinstance(value, str):
+            if value in replacements:
+                return replacements[value]
+            if value == "/van-gogh":
+                return f"/{site_id}"
+            if value.startswith("/van-gogh/"):
+                return f"/{site_id}/{value.removeprefix('/van-gogh/')}"
+            return value
+        if isinstance(value, list):
+            return [replace_starter_identity(item) for item in value]
+        if isinstance(value, dict):
+            return {key: replace_starter_identity(item) for key, item in value.items()}
+        return value
+
+    dashboard = replace_starter_identity(dashboard)
+    (release_root / "dashboard.json").write_text(
+        json.dumps(dashboard, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    release_manifest_path = release_root / "release.json"
+    release_manifest = json.loads(release_manifest_path.read_text(encoding="utf-8"))
+    release_manifest["target_profile"] = profile
+    release_manifest["files"] = _tree_inventory(release_root, excluded={"release.json"})
+    release_manifest_path.write_text(
+        json.dumps(release_manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     try:
         dashboard = json.loads((release_root / "dashboard.json").read_text(encoding="utf-8"))
         release_manifest = json.loads((release_root / "release.json").read_text(encoding="utf-8"))
@@ -365,6 +448,11 @@ def _compose_dashboard(
             if str(view.get("path") or "") not in consumed_paths | preserved_paths
         )
         result["views"] = composed
+    for key in ("mtae_profile", "wallpanel"):
+        if key in generated:
+            result[key] = deepcopy(generated[key])
+        else:
+            result.pop(key, None)
     result[PRODUCT_MARKER] = _schema_marker(package, site)
     return result
 
@@ -481,10 +569,12 @@ class ProductUpdateManager:
         self.installer = installer
         self.ha = ha
         self.installer_version = installer_version
+        self._pending_apply: dict[str, Any] | None = None
 
     def _foundation_sources(self, release_root: Path) -> dict[str, Path]:
         return {
             "assets": release_root / "assets",
+            "frontend": release_root.parent / "package" / "www" / "van-gogh2" / FRONTEND_VERSION,
             "owner_maintenance": release_root / "custom_components" / "mtae_owner_maintenance",
         }
 
@@ -513,6 +603,14 @@ class ProductUpdateManager:
                     raise ProductUpdateError(f"Generated Foundation release is missing {key}")
                 target = self.installer.config_root / FOUNDATION_TARGETS[key]
                 previous_present = target.is_dir()
+                created_parent_dirs: list[str] = []
+                parent = target.parent
+                while parent != self.installer.config_root:
+                    if not parent.exists():
+                        created_parent_dirs.append(
+                            parent.relative_to(self.installer.config_root).as_posix()
+                        )
+                    parent = parent.parent
                 if previous_present:
                     shutil.copytree(target, backup_root / key)
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -524,7 +622,11 @@ class ProductUpdateManager:
                 os.replace(stage, target)
                 shutil.rmtree(displaced, ignore_errors=True)
                 completed.append(key)
-                rows.append({"key": key, "previous_present": previous_present})
+                rows.append({
+                    "key": key,
+                    "previous_present": previous_present,
+                    "created_parent_dirs": created_parent_dirs,
+                })
         except Exception:
             for key in reversed(completed):
                 target = self.installer.config_root / FOUNDATION_TARGETS[key]
@@ -572,7 +674,31 @@ class ProductUpdateManager:
         stages = stages if stages is not None else self._stage_foundation_rollback(plan)
         transaction = self._apply_staged_foundation_rollback(plan, stages)
         self._finalize_staged_foundation_rollback(transaction)
+        self._cleanup_foundation_parent_dirs(receipt)
         return int(transaction["restored"])
+
+    def _cleanup_foundation_parent_dirs(self, receipt: dict[str, Any]) -> None:
+        """Remove only empty parent directories created by the corresponding install."""
+        rows = receipt.get("foundation_files")
+        if not isinstance(rows, list):
+            return
+        relative_paths = {
+            relative
+            for row in rows
+            if isinstance(row, dict)
+            for relative in row.get("created_parent_dirs", [])
+            if isinstance(relative, str) and relative
+        }
+        for relative in sorted(
+            relative_paths,
+            key=lambda value: len(Path(value).parts),
+            reverse=True,
+        ):
+            path = self.installer.config_root / relative
+            try:
+                path.rmdir()
+            except OSError:
+                pass
 
     def _apply_staged_foundation_rollback(
         self,
@@ -694,7 +820,11 @@ class ProductUpdateManager:
         release: dict[str, Any],
         site_manifest_path: Path,
         home_assistant_version: str,
+        *,
+        defer_commit: bool = False,
     ) -> dict[str, Any]:
+        if self._pending_apply is not None:
+            raise ProductUpdateError("A previous product update transaction is still pending")
         package = inspect_package(archive, str(release.get("sha256") or ""))
         if str(release.get("package_version")) != package.manifest["package_version"]:
             raise ProductUpdateError("Release and package versions do not match")
@@ -752,7 +882,11 @@ class ProductUpdateManager:
                     "version": package.manifest["component_version"],
                     "sha256": package.archive_sha256,
                 }
-                install_receipt = self.installer.install_archive(archive, install_manifest)
+                install_receipt = self.installer.install_archive(
+                    archive,
+                    install_manifest,
+                    defer_commit=True,
+                )
                 component_changed = True
                 foundation_rows = self._install_foundation_files(release_root, install_receipt["backup_id"])
                 foundation_changed = True
@@ -774,40 +908,113 @@ class ProductUpdateManager:
                     "dashboard_path": plan.url_path,
                     "dashboard_state": plan.state,
                 })
-            except Exception:
+            except Exception as error:
                 try:
-                    self.ha.restore_dashboard(snapshot)
-                finally:
-                    if foundation_changed and install_receipt is not None:
-                        rollback_receipt = dict(install_receipt)
-                        rollback_receipt["foundation_files"] = foundation_rows
-                        self._restore_foundation_files(rollback_receipt)
-                    if component_changed:
-                        self.installer.rollback()
-                raise
+                    self._recover_apply_state(
+                        snapshot,
+                        install_receipt,
+                        foundation_rows,
+                        foundation_changed,
+                        component_changed,
+                    )
+                except Exception as recovery_error:
+                    raise ProductUpdateError(
+                        "Product update failed and exact prestate recovery failed"
+                    ) from recovery_error
+                raise error
             after_site_sha = site_manifest_sha256(site_manifest_path)
             if after_site_sha != before_site_sha:
                 try:
-                    self.ha.restore_dashboard(snapshot)
-                finally:
-                    receipt = json.loads(self.installer.current_receipt.read_text(encoding="utf-8"))
-                    self._restore_foundation_files(receipt)
-                    self.installer.rollback()
+                    self._recover_apply_state(
+                        snapshot,
+                        install_receipt,
+                        foundation_rows,
+                        foundation_changed,
+                        component_changed,
+                    )
+                except Exception as recovery_error:
+                    raise ProductUpdateError(
+                        "Site manifest changed and exact prestate recovery failed"
+                    ) from recovery_error
                 raise ProductUpdateError("Local site manifest changed during update")
-            return {
+            result = {
                 "operation": "product_update",
                 "state": plan.state,
                 "package_version": package.manifest["package_version"],
                 "component_version": package.manifest["component_version"],
                 "foundation_version": package.manifest["foundation"]["version"],
-                "file_writes": int(component_changed) + 2 * int(foundation_changed),
+                "file_writes": int(component_changed) + len(foundation_rows),
                 "dashboard_writes": int(dashboard_changed),
                 "site_manifest_writes": 0,
                 "site_manifest_sha256": before_site_sha,
                 "rollback_available": component_changed and foundation_changed,
             }
+            self._pending_apply = {
+                "component_changed": component_changed,
+                "foundation_changed": foundation_changed,
+                "foundation_rows": foundation_rows,
+                "install_receipt": install_receipt,
+                "snapshot": snapshot,
+            }
+            if not defer_commit:
+                self.commit_pending_apply()
+            return result
+
+    def _recover_apply_state(
+        self,
+        snapshot: dict[str, Any],
+        install_receipt: dict[str, Any] | None,
+        foundation_rows: list[dict[str, Any]],
+        foundation_changed: bool,
+        component_changed: bool,
+    ) -> None:
+        """Recover every mutable product surface before reporting a failed update."""
+        recovery_errors: list[Exception] = []
+        try:
+            self.ha.restore_dashboard(snapshot)
+        except Exception as error:
+            recovery_errors.append(error)
+        if foundation_changed and install_receipt is not None:
+            try:
+                rollback_receipt = dict(install_receipt)
+                rollback_receipt["foundation_files"] = foundation_rows
+                self._restore_foundation_files(rollback_receipt)
+            except Exception as error:
+                recovery_errors.append(error)
+        if component_changed:
+            try:
+                self.installer.recover_pending_install()
+            except Exception as error:
+                recovery_errors.append(error)
+        if recovery_errors:
+            raise ProductUpdateError(
+                "Product update exact prestate recovery failed"
+            ) from recovery_errors[0]
+
+    def commit_pending_apply(self) -> None:
+        """Commit a deferred product update after app finalisation succeeds."""
+        if self._pending_apply is None:
+            raise ProductUpdateError("No product update transaction is pending")
+        self.installer.commit_pending_install()
+        self._pending_apply = None
+
+    def recover_pending_apply(self) -> None:
+        """Recover every product surface from a deferred update."""
+        if self._pending_apply is None:
+            raise ProductUpdateError("No product update transaction is pending")
+        pending = self._pending_apply
+        self._recover_apply_state(
+            pending["snapshot"],
+            pending["install_receipt"],
+            pending["foundation_rows"],
+            pending["foundation_changed"],
+            pending["component_changed"],
+        )
+        self._pending_apply = None
 
     def rollback(self) -> dict[str, Any]:
+        if self._pending_apply is not None:
+            self.commit_pending_apply()
         if not self.installer.current_receipt.is_file():
             raise ProductUpdateError("No product-update receipt is available to roll back")
         receipt = json.loads(self.installer.current_receipt.read_text(encoding="utf-8"))
@@ -836,6 +1043,7 @@ class ProductUpdateManager:
             foundation_restored = int(foundation_transaction["restored"])
             files = self.installer.commit_staged_rollback(component_transaction)
             self._finalize_staged_foundation_rollback(foundation_transaction)
+            self._cleanup_foundation_parent_dirs(receipt)
         except Exception:
             recovery_errors: list[Exception] = []
             if foundation_transaction is not None and not foundation_transaction["committed"]:

@@ -18,8 +18,8 @@ This repository contains the **MTAE Van Gogh Installer** application shell. It d
 
 4. Install **MTAE Van Gogh Installer**.
 5. Start the app and open its Web UI.
-6. Enter the one-time MTAE Install Code supplied through the authorised MTAE channel, then select **Activate site**. The permanent HTTPS endpoint is built into the App.
-7. Ensure the commissioned site manifest exists at `/config/van_gogh2-site.json`, then select **Check release** and **Install / update**. Installer `1.2.1` accepts the private product package `1.0.0-builder.23-p0.3`, carrying component `2.0.0-builder.23-p0.3`, only when its pinned identity and the local site manifest both validate.
+6. Choose the authorised release channel and `Wall-10` or `Mobile` starter, enter the one-time MTAE Install Code, then select **Activate site**. The permanent HTTPS endpoint is built into the App.
+7. On a clean system, activation creates `/config/van_gogh2-site.json` from the package-owned neutral starter. An existing valid manifest remains authoritative and is preserved byte-for-byte. Select **Check release** and **Install / update**. This unpublished Installer `1.2.2` candidate accepts private product package `1.0.0-builder.22-deployable.4`, carrying component `2.0.0-builder.3`, Foundation `1.5.0`, and frontend assets `2.0.0-suite.1`.
 
 ## What the Installer does
 
@@ -42,7 +42,7 @@ This repository contains the **MTAE Van Gogh Installer** application shell. It d
 - Archive extraction rejects traversal paths, links and special files.
 - File writes are restricted to Van Gogh-owned integration and Installer state paths.
 - The Installer does not operate Home Assistant entities or equipment.
-- The local site manifest is never written by the Installer; unrelated dashboard definitions, cards, views, custom components and resources remain outside its mutation scope.
+- The Installer creates a neutral local site manifest only when none exists; an existing valid manifest is never rewritten. Unrelated dashboard definitions, cards, views, custom components and resources remain outside its mutation scope.
 
 Security reports: **admin@mtae.com.au**
 

@@ -25,6 +25,7 @@ from product_update import (  # noqa: E402
     PRODUCT_MARKER,
     ProductUpdateError,
     ProductUpdateManager,
+    _compose_dashboard,
     inspect_package,
     validate_site_manifest,
 )
@@ -162,7 +163,7 @@ class ProductUpdateTests(unittest.TestCase):
         return hashlib.sha256(self.site_path.read_bytes()).hexdigest()
 
     def manager(self, ha):
-        return ProductUpdateManager(InstallManager(self.config), ha, "1.2.1")
+        return ProductUpdateManager(InstallManager(self.config), ha, "1.2.2")
 
     def apply(self, manager):
         return manager.apply(self.archive, self.release, self.site_path, "2026.9.1")
@@ -329,8 +330,8 @@ class ProductUpdateTests(unittest.TestCase):
 
     def test_package_is_deterministic_site_neutral_and_identity_separated(self):
         package = inspect_package(self.archive, self.release["sha256"])
-        self.assertEqual(package.manifest["package_version"], "1.0.0-builder.23-p0.3")
-        self.assertEqual(package.manifest["component_version"], "2.0.0-builder.23-p0.3")
+        self.assertEqual(package.manifest["package_version"], "1.0.0-builder.22-deployable.4")
+        self.assertEqual(package.manifest["component_version"], "2.0.0-builder.3")
         self.assertEqual(package.manifest["foundation"]["version"], "1.5.0")
         self.assertNotEqual(package.manifest["package_version"], package.manifest["component_version"])
         with tarfile.open(self.archive, "r:gz") as package_tar:
@@ -393,6 +394,21 @@ class ProductUpdateTests(unittest.TestCase):
         self.assertEqual(self.site_path.read_bytes(), before)
         self.assertEqual(hashlib.sha256(self.site_path.read_bytes()).hexdigest(), site_sha)
 
+    def test_clean_install_deploys_and_rolls_back_frontend_assets(self):
+        self.write_site(self.site("site-frontend", "Frontend Site"))
+        manager = self.manager(FakeHA())
+
+        receipt = self.apply(manager)
+
+        frontend = self.config / FOUNDATION_TARGETS["frontend"]
+        module = frontend / "van-gogh2.js"
+        self.assertTrue(module.is_file())
+        self.assertEqual(receipt["file_writes"], 1 + len(FOUNDATION_TARGETS))
+
+        rolled_back = manager.rollback()
+        self.assertTrue(rolled_back["readback_verified"])
+        self.assertFalse(frontend.exists())
+
     def test_optional_feature_present_for_all_but_locally_enabled(self):
         markers = []
         for enabled in (False, True):
@@ -408,10 +424,10 @@ class ProductUpdateTests(unittest.TestCase):
         package = inspect_package(self.archive, self.release["sha256"])
         self.assertIn("irrigation", package.catalogue["features"])
 
-    def test_product_package_matches_frozen_builder23_identity(self):
+    def test_product_package_matches_frozen_builder22_successor_identity(self):
         self.assertEqual(
             hashlib.sha256(self.archive.read_bytes()).hexdigest(),
-            "c41d81c1615cebadabea8f1eff419c45bc8d74856d1698453c728d2cd46e39b9",
+            "3fdb5bbb6a9d67fe2aa25bab1c3ef715d1c9574a6235b52c997cf21cabc3a5b6",
         )
         self.assertEqual(self.release["sha256"], hashlib.sha256(self.archive.read_bytes()).hexdigest())
 
@@ -444,6 +460,7 @@ class ProductUpdateTests(unittest.TestCase):
             manager.installer.target,
             self.config / FOUNDATION_TARGETS["owner_maintenance"],
             self.config / FOUNDATION_TARGETS["assets"],
+            self.config / FOUNDATION_TARGETS["frontend"],
         )
         forbidden = (
             re.compile(r"-----begin (?:rsa |ec |openssh )?private key-----", re.IGNORECASE),
@@ -485,6 +502,35 @@ class ProductUpdateTests(unittest.TestCase):
         self.assertEqual(next(view for view in after["views"] if view.get("path") == "owner-notes"), before_external)
         self.assertEqual(after["custom_top_level"], before_top)
         self.assertEqual(self.site_path.read_bytes(), site_bytes)
+
+    def test_existing_upgrade_replaces_only_managed_profile_chrome(self):
+        package = inspect_package(self.archive, self.release["sha256"])
+        with tarfile.open(self.archive, "r:gz") as bundle:
+            starter_file = bundle.extractfile("starter/mobile-app-dashboard.json")
+            self.assertIsNotNone(starter_file)
+            assert starter_file is not None
+            generated = json.load(starter_file)
+        site = self.site("mobile-existing", "Mobile Existing")
+        site["panel"] = {
+            "id": "mobile-existing-panel",
+            "type": "phone",
+            "profile": "mobile/app",
+            "display_mode": "companion-app",
+        }
+        base = {
+            "title": "Locally preserved title",
+            "mtae_profile": {"id": "stale-profile"},
+            "wallpanel": {"enabled": False},
+            "local_owner_setting": {"preserve": True},
+            "views": [],
+        }
+
+        result = _compose_dashboard(generated, base, package, site)
+
+        self.assertEqual(result["mtae_profile"], generated["mtae_profile"])
+        self.assertEqual(result["wallpanel"], generated["wallpanel"])
+        self.assertEqual(result["title"], base["title"])
+        self.assertEqual(result["local_owner_setting"], base["local_owner_setting"])
 
     def test_legacy_upgrade_preserves_unaffected_content(self):
         self.write_site(self.site())

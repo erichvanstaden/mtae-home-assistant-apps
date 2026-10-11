@@ -45,12 +45,12 @@ def module_url_for_release(release_version: str) -> str:
         or not RELEASE_VERSION_PATTERN.fullmatch(release_version)
     ):
         raise HAError("Van Gogh release manifest version is invalid")
-    return f"/van-gogh2-assets/{release_version}/van-gogh2.js"
+    return f"/local/van-gogh2/{release_version}/van-gogh2.js"
 
 
 def _is_van_gogh_resource(item: dict[str, Any]) -> bool:
     url = str(item.get("url", "")).split("?", 1)[0]
-    return url.startswith("/van-gogh2-assets/") and url.endswith("/van-gogh2.js")
+    return url.startswith(("/van-gogh2-assets/", "/local/van-gogh2/")) and url.endswith("/van-gogh2.js")
 
 
 def _resource_type(item: dict[str, Any]) -> Any:
@@ -273,7 +273,19 @@ class HAClient:
     @classmethod
     def from_environment(cls) -> "HAClient | None":
         token = os.environ.get("SUPERVISOR_TOKEN", "")
-        return cls(token=token, host=os.environ.get("SUPERVISOR_HOST", "supervisor")) if token else None
+        if not token:
+            return None
+        try:
+            port = int(os.environ.get("SUPERVISOR_PORT", "80"))
+        except ValueError as error:
+            raise HAError("Supervisor port is invalid") from error
+        if not 1 <= port <= 65535:
+            raise HAError("Supervisor port is invalid")
+        return cls(
+            token=token,
+            host=os.environ.get("SUPERVISOR_HOST", "supervisor"),
+            port=port,
+        )
 
     @property
     def api_base(self) -> str:
@@ -776,14 +788,18 @@ class HAClient:
             if now >= deadline:
                 raise HAError(
                     f"Van Gogh module was not ready within {wait_seconds:g} seconds "
-                    f"(last transient failure: {last_failure})"
+                    f"(last transient failure: {last_failure}; origin: {request.full_url})"
                 )
             time.sleep(min(poll_interval, deadline - now))
 
-    def finish_setup(self, release_version: str) -> dict[str, Any]:
-        module_url = module_url_for_release(release_version)
+    def finish_setup(self, module_url: str) -> dict[str, Any]:
+        if not isinstance(module_url, str) or re.fullmatch(
+            r"/local/van-gogh2/[0-9A-Za-z][0-9A-Za-z.-]{0,127}/van-gogh2\.js",
+            module_url,
+        ) is None:
+            raise HAError("Van Gogh frontend module URL is invalid")
         config = self.wait_ready()
-        entry = self.ensure_config_entry()
+        entry = {"required": False, "state": "not_required"}
         resource = self.ensure_resource(module_url)
         module = self.probe_module(module_url)
         return {

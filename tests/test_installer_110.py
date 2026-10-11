@@ -99,16 +99,37 @@ class Installer110ContractTests(unittest.TestCase):
         manifest = {
             **self.manifest(),
             "archive": "/private/product-package.tar.gz",
+            "module_url": "/local/van-gogh2/2.0.0-suite.1/van-gogh2.js",
             "supported_home_assistant": {"minimum": "2026.8.3", "maximum_exclusive": "2027.0.0"},
         }
         with mock.patch.object(installer, "_urlopen", return_value=FakeHTTPResponse(manifest)):
             result = installer.ReleaseClient("https://example.invalid", "site-credential").latest()
-        for key in ("package_version", "component_version", "foundation_version", "package_schema"):
+        for key in (
+            "package_version",
+            "component_version",
+            "foundation_version",
+            "package_schema",
+            "module_url",
+        ):
             self.assertEqual(result[key], manifest[key])
 
     def test_ha_client_exposes_product_dashboard_writer_not_legacy_builder_bootstrap(self):
         self.assertTrue(callable(getattr(HAClient, "save_dashboard", None)))
         self.assertFalse(hasattr(HAClient, "ensure_builder_dashboard"))
+
+    def test_finish_setup_uses_builtin_local_assets_without_config_entry(self):
+        client = HAClient(token="test")
+        client.wait_ready = lambda: {"version": "2026.8.3"}
+        client.ensure_config_entry = lambda: self.fail("config entry must not be created")
+        client.ensure_resource = lambda module_url: {"url": module_url, "count": 1}
+        client.probe_module = lambda module_url: {"url": module_url, "status": 200}
+
+        module_url = "/local/van-gogh2/2.0.0-suite.1/van-gogh2.js"
+        result = client.finish_setup(module_url)
+
+        self.assertEqual(result["integration"], {"required": False, "state": "not_required"})
+        self.assertEqual(result["resource"]["url"], module_url)
+
 
     def test_wrong_product_identity_or_digest_is_rejected(self):
         for key, value in (

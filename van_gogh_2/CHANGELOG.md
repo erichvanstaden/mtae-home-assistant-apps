@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.2.2
+
+- Ship corrected Builder.22 successor package `1.0.0-builder.22-deployable.4`, component `2.0.0-builder.3`, Foundation `1.5.0`, and frontend assets `2.0.0-suite.1` as an unpublished candidate with a fail-closed neutral profile contract: Wall-10 remains its canonical seven routes and Mobile remains its canonical eleven routes.
+- Select the profile-specific neutral starter only after Foundation generates shared assets, preventing Wall/Mobile cross-profile dispatch while retaining existing-site preservation and rollback behaviour.
+- Preserve the protected Builder.22 renderer, component, geometry, interaction and safety source bytes; only allowlisted site identity, route and binding values are neutralised in generated starters.
+- Add explicit production/staging selection and Wall-10/Mobile starter profiles to one-time Install Code activation.
+- Create a package-owned neutral starter manifest on clean activation while preserving an existing valid canonical site manifest byte-for-byte.
+- Keep the component, Foundation files, dashboard, Home Assistant prestate and both install receipts inside one recoverable transaction until all post-install receipt finalisation succeeds.
+- Restore the exact pre-call state when current-receipt, operation-receipt, Home Assistant prestate-annotation or readiness-annotation persistence fails.
+- Preserve Installer 1.2.1 containment behaviour; no live-system or equipment action is added.
+
 ## 1.2.1
 
 - Bind dashboard planning to the canonical site ID so a new site installs only at its supplied path and never upgrades an unrelated Installer-managed or legacy Van Gogh dashboard.

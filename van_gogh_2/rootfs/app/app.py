@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import threading
 from http import HTTPStatus
@@ -25,7 +26,7 @@ OPERATION_LOCK = threading.Lock()
 DEFAULT_RELEASE_ENDPOINT = os.environ.get(
     "VAN_GOGH_RELEASE_ENDPOINT", "https://installer.mtae.com.au"
 ).rstrip("/")
-INSTALLER_VERSION = "1.2.1"
+INSTALLER_VERSION = "1.2.2"
 PRODUCT_PACKAGE_SCHEMA = "mtae.van-gogh.product-package.v1"
 
 
@@ -97,12 +98,66 @@ def _operation_snapshot() -> dict[str, Any]:
         return dict(OPERATION_STATE)
 
 
-def _atomic_settings(payload: dict[str, str]) -> None:
+def _atomic_settings(payload: dict[str, Any]) -> None:
     DATA_ROOT.mkdir(parents=True, exist_ok=True)
     temporary = SETTINGS.with_name(".settings.tmp")
     temporary.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
     os.chmod(temporary, 0o600)
     os.replace(temporary, SETTINGS)
+
+
+def _site_manifest_profile() -> str | None:
+    """Return the protected existing profile, failing before code exchange if invalid."""
+    if not SITE_MANIFEST.is_file():
+        return None
+    try:
+        current = json.loads(SITE_MANIFEST.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise InstallError("Existing canonical site manifest is not valid JSON") from error
+    profile = current.get("panel", {}).get("profile") if isinstance(current, dict) else None
+    if profile not in {"wall-10", "mobile/app"}:
+        raise InstallError("Existing canonical site manifest has an unsupported profile")
+    return str(profile)
+
+
+def _commit_activation(activated: dict[str, Any]) -> str:
+    """Persist activation and create a neutral manifest only when none exists."""
+    supplied_manifest = activated.get("site_manifest")
+    if not isinstance(supplied_manifest, dict):
+        raise InstallError("Activation did not return a neutral starter manifest")
+    site = supplied_manifest.get("site")
+    panel = supplied_manifest.get("panel")
+    if (
+        not isinstance(site, dict)
+        or not isinstance(site.get("id"), str)
+        or not isinstance(panel, dict)
+        or panel.get("profile") not in {"wall-10", "mobile/app"}
+    ):
+        raise InstallError("Activation returned an invalid neutral starter manifest")
+    settings_payload = {key: value for key, value in activated.items() if key != "site_manifest"}
+    before_settings = SETTINGS.read_bytes() if SETTINGS.is_file() else None
+    created_manifest = not SITE_MANIFEST.exists()
+    try:
+        _atomic_settings(settings_payload)
+        if created_manifest:
+            CONFIG_ROOT.mkdir(parents=True, exist_ok=True)
+            temporary = SITE_MANIFEST.with_name(".van_gogh2-site.tmp")
+            temporary.write_text(
+                json.dumps(supplied_manifest, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, SITE_MANIFEST)
+    except OSError as error:
+        if before_settings is None:
+            SETTINGS.unlink(missing_ok=True)
+        else:
+            SETTINGS.write_bytes(before_settings)
+            os.chmod(SETTINGS, 0o600)
+        if created_manifest:
+            SITE_MANIFEST.unlink(missing_ok=True)
+        raise InstallError("Activation state could not be persisted safely") from error
+    return "created_neutral" if created_manifest else "preserved_existing"
 
 
 def _validate_product_release_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -125,10 +180,19 @@ def _validate_product_release_manifest(manifest: dict[str, Any]) -> dict[str, An
         bytes.fromhex(digest)
     except ValueError as error:
         raise InstallError("Product release SHA-256 is invalid") from error
+    module_url = manifest.get("module_url")
+    if module_url is None:
+        module_url = module_url_for_release(str(manifest["version"]))
+    if not isinstance(module_url, str) or re.fullmatch(
+        r"/local/van-gogh2/[0-9A-Za-z][0-9A-Za-z.-]{0,127}/van-gogh2\.js",
+        module_url,
+    ) is None:
+        raise InstallError("Product release frontend module URL is invalid")
+    manifest["module_url"] = module_url
     return manifest
 
 
-def _settings() -> dict[str, str]:
+def _settings() -> dict[str, Any]:
     if not SETTINGS.is_file():
         return {}
     try:
@@ -254,12 +318,22 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/activate":
                 operation_id = _operation_begin("activation", "activating")
                 install_code = str(payload.get("install_code", ""))
-                activated = ReleaseClient.activate(DEFAULT_RELEASE_ENDPOINT, install_code)
-                _atomic_settings(activated)
+                channel = str(payload.get("channel", "production"))
+                profile = _site_manifest_profile() or str(payload.get("profile", "wall-10"))
+                activated = ReleaseClient.activate(
+                    DEFAULT_RELEASE_ENDPOINT,
+                    install_code,
+                    channel,
+                    profile,
+                )
+                starter_manifest_state = _commit_activation(activated)
                 result: dict[str, Any] = {
                     "activated": True,
                     "site_id": activated["site_id"],
                     "site_name": activated["site_name"],
+                    "channel": activated["channel"],
+                    "profile": activated["profile"],
+                    "starter_manifest": starter_manifest_state,
                     "credential_returned": False,
                     "install_code_stored": False,
                 }
@@ -310,47 +384,53 @@ class Handler(BaseHTTPRequestHandler):
                             manifest,
                             SITE_MANIFEST,
                             core_version,
+                            defer_commit=True,
                         )
                     receipt: dict[str, Any] | None = None
                     if product_result["file_writes"]:
-                        receipt = manager.annotate_current({"ha_prestate": prestate})
-                    elif manager.current_receipt.is_file():
-                        receipt = json.loads(manager.current_receipt.read_text(encoding="utf-8"))
-                    if product_result["file_writes"]:
+                        restart_requested = False
                         try:
+                            receipt = manager.annotate_current({"ha_prestate": prestate})
                             _operation_update(operation_id, "requesting_restart")
+                            restart_requested = True
                             restart_cycle = ha.restart_and_wait_ready(
                                 progress=lambda stage: _operation_update(operation_id, stage)
                             )
                             _operation_update(operation_id, "verifying_readiness")
-                            readiness = ha.finish_setup(manifest["version"])
+                            readiness = ha.finish_setup(manifest["module_url"])
                             readiness["restart_cycle"] = restart_cycle
                             receipt = manager.annotate_current({
                                 "readiness": readiness,
                                 "restart_required": False,
                             })
+                            updater.commit_pending_apply()
                         except HARestartPending:
+                            updater.commit_pending_apply()
                             raise
-                        except HAError as error:
+                        except Exception as error:
                             try:
                                 _operation_update(operation_id, "automatic_rollback")
-                                updater.rollback()
-                                ha.restart_and_wait_ready(
-                                    progress=lambda stage: _operation_update(operation_id, stage)
-                                )
+                                updater.recover_pending_apply()
+                                if restart_requested:
+                                    ha.restart_and_wait_ready(
+                                        progress=lambda stage: _operation_update(operation_id, stage)
+                                    )
                                 ha.restore_prestate(prestate)
                             except HARestartPending as pending:
                                 raise HARestartPending(
-                                    "Install readiness failed; files were restored but the rollback "
+                                    "Install finalisation failed; files were restored but the rollback "
                                     f"restart remains pending: {pending}"
                                 ) from pending
                             except Exception as rollback_error:
                                 raise InstallError(
-                                    f"Install readiness failed and automatic rollback failed ({type(rollback_error).__name__})"
+                                    "Install finalisation failed and automatic rollback failed "
+                                    f"({type(rollback_error).__name__})"
                                 ) from rollback_error
                             raise InstallError(
-                                f"Install readiness failed; automatic rollback completed: {error}"
+                                f"Install finalisation failed; automatic rollback completed: {error}"
                             ) from error
+                    elif manager.current_receipt.is_file():
+                        receipt = json.loads(manager.current_receipt.read_text(encoding="utf-8"))
                     result = {
                         "installed": True,
                         "product_update": product_result,

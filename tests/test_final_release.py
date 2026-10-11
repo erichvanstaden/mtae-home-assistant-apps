@@ -8,7 +8,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 ADDON = ROOT / "van_gogh_2"
 APP = ADDON / "rootfs" / "app"
-BUILDER23_SHA256 = "c41d81c1615cebadabea8f1eff419c45bc8d74856d1698453c728d2cd46e39b9"
+BUILDER22_SUCCESSOR_SHA256 = "3fdb5bbb6a9d67fe2aa25bab1c3ef715d1c9574a6235b52c997cf21cabc3a5b6"
 
 
 def assignment_string(path: Path, name: str) -> str:
@@ -34,19 +34,23 @@ class FinalReleaseIdentityTests(unittest.TestCase):
         config = ADDON / "config.yaml"
         self.assertEqual(yaml_scalar(config, "name"), "MTAE Van Gogh Installer")
         self.assertEqual(yaml_scalar(config, "slug"), "van_gogh_2")
-        self.assertEqual(yaml_scalar(config, "version"), "1.2.1")
+        self.assertEqual(yaml_scalar(config, "version"), "1.2.2")
 
     def test_runtime_reports_final_installer_version(self):
-        self.assertEqual(assignment_string(APP / "app.py", "INSTALLER_VERSION"), "1.2.1")
+        self.assertEqual(assignment_string(APP / "app.py", "INSTALLER_VERSION"), "1.2.2")
 
-    def test_frozen_builder23_package_is_the_release_payload(self):
+    def test_frozen_builder22_successor_is_the_release_payload(self):
         release = json.loads((ROOT / "dist" / "RELEASE-MANIFEST.json").read_text(encoding="utf-8"))
         archive = ROOT / "dist" / release["archive"]
         digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-        self.assertEqual(digest, BUILDER23_SHA256)
-        self.assertEqual(release["sha256"], BUILDER23_SHA256)
-        self.assertEqual(release["package_version"], "1.0.0-builder.23-p0.3")
-        self.assertEqual(release["component_version"], "2.0.0-builder.23-p0.3")
+        self.assertEqual(digest, BUILDER22_SUCCESSOR_SHA256)
+        self.assertEqual(release["sha256"], BUILDER22_SUCCESSOR_SHA256)
+        self.assertEqual(release["package_version"], "1.0.0-builder.22-deployable.4")
+        self.assertEqual(release["component_version"], "2.0.0-builder.3")
+        self.assertEqual(
+            release["module_url"],
+            "/local/van-gogh2/2.0.0-suite.1/van-gogh2.js",
+        )
 
     def test_upgrade_safe_data_and_config_mounts_remain_stable(self):
         config = (ADDON / "config.yaml").read_text(encoding="utf-8")
@@ -56,7 +60,17 @@ class FinalReleaseIdentityTests(unittest.TestCase):
         self.assertIn('VAN_GOGH_CONFIG_ROOT", "/homeassistant"', app)
         self.assertIn('SETTINGS = DATA_ROOT / "settings.json"', app)
         self.assertNotIn("rmtree(DATA_ROOT", app)
-        self.assertNotIn("unlink(missing_ok=True)", app)
+        self.assertNotIn("rmtree(CONFIG_ROOT", app)
+
+    def test_declared_architectures_use_commissioned_python_314_bases(self):
+        config = (ADDON / "config.yaml").read_text(encoding="utf-8")
+        build = (ADDON / "build.yaml").read_text(encoding="utf-8")
+        for architecture in ("amd64", "aarch64"):
+            self.assertIn(f"  - {architecture}", config)
+            self.assertIn(
+                f'{architecture}: "ghcr.io/home-assistant/{architecture}-base-python:3.14-alpine3.23"',
+                build,
+            )
 
     def test_ingress_ui_describes_the_product_package_contract(self):
         source = (APP / "index.html").read_text(encoding="utf-8")
@@ -70,9 +84,9 @@ class FinalReleaseIdentityTests(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         changelog = (ADDON / "CHANGELOG.md").read_text(encoding="utf-8")
         for source in (readme, changelog):
-            self.assertIn("1.2.1", source)
-            self.assertIn("1.0.0-builder.23-p0.3", source)
-            self.assertIn("2.0.0-builder.23-p0.3", source)
+            self.assertIn("1.2.2", source)
+            self.assertIn("1.0.0-builder.22-deployable.4", source)
+            self.assertIn("2.0.0-builder.3", source)
         self.assertNotIn("Installer 1.1.17 accepts only", readme)
         self.assertNotIn("Migrate Home C-grid", readme)
         self.assertNotIn("Create / refresh Family review", readme)

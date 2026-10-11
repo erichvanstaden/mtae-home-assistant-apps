@@ -16,7 +16,7 @@
     p { margin:5px 0; color:var(--muted); }
     section { background:rgba(15,35,45,.9); border:1px solid rgba(220,183,97,.48); border-radius:18px; padding:20px; margin:14px 0; box-shadow:0 14px 36px rgba(0,0,0,.22); }
     label { display:block; margin:10px 0 5px; font-weight:700; }
-    input { width:100%; padding:12px; border-radius:10px; border:1px solid #52717a; background:#0c222c; color:var(--ink); }
+    input, select { width:100%; padding:12px; border-radius:10px; border:1px solid #52717a; background:#0c222c; color:var(--ink); }
     .actions { display:flex; gap:10px; flex-wrap:wrap; margin-top:14px; }
     button { border:0; border-radius:999px; padding:11px 17px; background:var(--edge); color:#16242a; font-weight:800; cursor:pointer; }
     button.secondary { background:#66818a; color:white; }
@@ -56,6 +56,8 @@
   <section>
     <h2>Activate this site</h2>
     <p>Enter the one-time MTAE Install Code supplied for this site. The code is exchanged once for a protected site credential and is not stored.</p>
+    <label for="releaseChannel">Release channel</label><select id="releaseChannel"><option value="production">Production</option><option value="staging">Staging / test</option></select>
+    <label for="starterProfile">Starter profile</label><select id="starterProfile"><option value="wall-10">Wall-10</option><option value="mobile/app">Mobile</option></select>
     <label for="installCode">MTAE Install Code</label><input id="installCode" type="password" autocomplete="one-time-code" placeholder="MTAE-VG-XXXX-XXXX-XXXX">
     <div class="actions"><button id="activateButton" onclick="activateSite()">Activate site</button><button id="checkButton" class="secondary" onclick="checkRelease()">Check release</button></div>
   </section>
@@ -154,7 +156,7 @@ async function api(path, body, initialStage) {
     updateButtons();
   }
 }
-async function activateSite(){ await api('api/activate',{install_code:document.getElementById('installCode').value},'activating'); document.getElementById('installCode').value=''; }
+async function activateSite(){ await api('api/activate',{install_code:document.getElementById('installCode').value,channel:document.getElementById('releaseChannel').value,profile:document.getElementById('starterProfile').value},'activating'); document.getElementById('installCode').value=''; }
 async function checkRelease(){ await api('api/check',{},'checking_release'); sessionReleaseChecked=true; renderProgress(lastStatus); updateButtons(); }
 async function installRelease(){ if(confirm('Install or update Van Gogh 2 from the verified private release, then restart Home Assistant Core to finish setup?')) await api('api/install',{},'checking_release'); }
 async function rollback(){ if(confirm('Restore the exact state from before the last successful install?')) await api('api/rollback',{confirm:'rollback'},'restoring_files'); }

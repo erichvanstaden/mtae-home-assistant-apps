@@ -64,7 +64,7 @@ class ProductRollbackTransactionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.config = Path(self.temporary.name) / "config"
-        self.manager = ProductUpdateManager(InstallManager(self.config), FakeHA(), "1.2.1")
+        self.manager = ProductUpdateManager(InstallManager(self.config), FakeHA(), "1.2.2")
         install = self.manager.installer
         self.backup_id = "synthetic-backup"
 
