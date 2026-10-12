@@ -17,6 +17,7 @@ APP = ROOT / "van_gogh_2" / "rootfs" / "app"
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(APP))
 
+import app as installer_app  # noqa: E402  # pyright: ignore[reportMissingImports]
 from dashboard_migration import GRID_TYPE, HOME_VIEW_TYPE, discover_dashboard  # noqa: E402
 from installer import InstallError, InstallManager  # noqa: E402
 from product_update import (  # noqa: E402
@@ -163,7 +164,7 @@ class ProductUpdateTests(unittest.TestCase):
         return hashlib.sha256(self.site_path.read_bytes()).hexdigest()
 
     def manager(self, ha):
-        return ProductUpdateManager(InstallManager(self.config), ha, "1.2.2")
+        return ProductUpdateManager(InstallManager(self.config), ha, "1.2.3")
 
     def apply(self, manager):
         return manager.apply(self.archive, self.release, self.site_path, "2026.9.1")
@@ -330,7 +331,7 @@ class ProductUpdateTests(unittest.TestCase):
 
     def test_package_is_deterministic_site_neutral_and_identity_separated(self):
         package = inspect_package(self.archive, self.release["sha256"])
-        self.assertEqual(package.manifest["package_version"], "1.0.0-builder.22-deployable.4")
+        self.assertEqual(package.manifest["package_version"], "1.0.0-builder.22-deployable.5")
         self.assertEqual(package.manifest["component_version"], "2.0.0-builder.3")
         self.assertEqual(package.manifest["foundation"]["version"], "1.5.0")
         self.assertNotEqual(package.manifest["package_version"], package.manifest["component_version"])
@@ -365,6 +366,217 @@ class ProductUpdateTests(unittest.TestCase):
                 self.config.mkdir()
         self.assertEqual(len(set(hashes)), 1)
         self.assertNotEqual(dashboards[0], dashboards[1])
+
+    def test_clean_both_installs_wall_and_mobile_at_deterministic_paths(self):
+        site = self.site(site_id="both-site", title="Both Site")
+        site_bytes = json.dumps(site, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+        self.site_path.write_bytes(site_bytes)
+        ha = FakeHA()
+
+        receipt = self.manager(ha).apply(
+            self.archive,
+            self.release,
+            self.site_path,
+            "2026.9.1",
+            dashboard_targets=["wall-10", "mobile/app"],
+        )
+
+        dashboards = {row["registry"]["url_path"]: row["config"] for row in ha.rows}
+        self.assertEqual(sorted(dashboards), ["both-site", "both-site-mobile"])
+        self.assertEqual(len(dashboards["both-site"]["views"]), 7)
+        self.assertEqual(len(dashboards["both-site-mobile"]["views"]), 11)
+        self.assertEqual(receipt["dashboard_targets"], ["wall-10", "mobile/app"])
+        self.assertEqual(self.site_path.read_bytes(), site_bytes)
+
+    def test_wall_only_and_mobile_only_paths_remain_supported(self):
+        cases = (
+            ("wall-10", "single-wall", 7),
+            ("mobile/app", "single-mobile-mobile", 11),
+        )
+        for index, (target, expected_path, expected_routes) in enumerate(cases):
+            with self.subTest(target=target):
+                if index:
+                    self.config = self.root / f"config-single-{index}"
+                    self.config.mkdir()
+                self.write_site(self.site(site_id=f"single-{'wall' if index == 0 else 'mobile'}"))
+                ha = FakeHA()
+
+                receipt = self.manager(ha).apply(
+                    self.archive,
+                    self.release,
+                    self.site_path,
+                    "2026.9.1",
+                    dashboard_targets=[target],
+                )
+
+                self.assertEqual(receipt["dashboard_targets"], [target])
+                self.assertEqual(len(ha.rows), 1)
+                self.assertEqual(ha.rows[0]["registry"]["url_path"], expected_path)
+                self.assertEqual(len(ha.rows[0]["config"]["views"]), expected_routes)
+
+    def test_both_targets_preserve_unrelated_dashboard_exactly(self):
+        unrelated = {
+            "registry": {
+                "id": "owner-dashboard-id",
+                "url_path": "owner-dashboard",
+                "title": "Owner dashboard",
+                "mode": "storage",
+                "owner_extension": {"preserve": True},
+            },
+            "config": {
+                "title": "Owner dashboard",
+                "views": [{"path": "notes", "cards": [{"type": "markdown", "content": "exact"}]}],
+                "owner_extension": [1, 2, 3],
+            },
+        }
+        before = copy.deepcopy(unrelated)
+        self.write_site(self.site(site_id="bounded-both", title="Bounded Both"))
+        ha = FakeHA([unrelated])
+
+        self.manager(ha).apply(
+            self.archive,
+            self.release,
+            self.site_path,
+            "2026.9.1",
+            dashboard_targets=["wall-10", "mobile/app"],
+        )
+
+        self.assertEqual(ha._row("owner-dashboard"), before)
+        self.assertEqual(
+            sorted(row["registry"]["url_path"] for row in ha.rows),
+            ["bounded-both", "bounded-both-mobile", "owner-dashboard"],
+        )
+
+    def test_offline_122_activated_wall_state_adds_mobile_without_reactivation(self):
+        site = self.site(site_id="offline-upgrade", title="Offline Upgrade")
+        site["panel"].update({
+            "profile": "wall-10",
+            "type": "wall",
+            "display_mode": "ha-shell",
+        })
+        site_bytes = json.dumps(site, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+        self.site_path.write_bytes(site_bytes)
+        data_root = self.root / "data"
+        data_root.mkdir()
+        settings_path = data_root / "settings.json"
+        credential = "[REDACTED]"
+        settings_path.write_text(
+            json.dumps({
+                "channel": "production",
+                "credential": credential,
+                "profile": "wall-10",
+                "site_id": "offline-upgrade",
+                "site_name": "Offline Upgrade",
+            }, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        archive_before = hashlib.sha256(self.archive.read_bytes()).hexdigest()
+        release_before = hashlib.sha256(
+            (ROOT / "dist" / "RELEASE-MANIFEST.json").read_bytes()
+        ).hexdigest()
+
+        with (
+            patch.multiple(
+                installer_app,
+                DATA_ROOT=data_root,
+                SETTINGS=settings_path,
+                CONFIG_ROOT=self.config,
+                SITE_MANIFEST=self.site_path,
+            ),
+            patch.object(
+                installer_app.ReleaseClient,
+                "activate",
+                side_effect=AssertionError("upgrade must not repeat activation"),
+            ) as activate,
+        ):
+            targets = installer_app._set_dashboard_targets(["mobile/app"])
+
+        ha = FakeHA()
+        receipt = self.manager(ha).apply(
+            self.archive,
+            self.release,
+            self.site_path,
+            "2026.9.1",
+            dashboard_targets=targets,
+        )
+
+        activate.assert_not_called()
+        self.assertEqual(targets, ["wall-10", "mobile/app"])
+        self.assertEqual(receipt["dashboard_targets"], targets)
+        self.assertEqual(
+            sorted(row["registry"]["url_path"] for row in ha.rows),
+            ["offline-upgrade", "offline-upgrade-mobile"],
+        )
+        self.assertEqual([len(row["config"]["views"]) for row in ha.rows], [7, 11])
+        self.assertEqual(self.site_path.read_bytes(), site_bytes)
+        self.assertEqual(json.loads(settings_path.read_text())["credential"], credential)
+        self.assertEqual(hashlib.sha256(self.archive.read_bytes()).hexdigest(), archive_before)
+        self.assertEqual(
+            hashlib.sha256((ROOT / "dist" / "RELEASE-MANIFEST.json").read_bytes()).hexdigest(),
+            release_before,
+        )
+
+    def test_mobile_dashboard_uses_site_title_with_mobile_suffix(self):
+        self.write_site(self.site(site_id="dual-site", title="Kitchen"))
+        ha = FakeHA()
+
+        self.manager(ha).apply(
+            self.archive,
+            self.release,
+            self.site_path,
+            "2026.9.1",
+            dashboard_targets=["mobile/app"],
+        )
+
+        self.assertEqual(ha._row("dual-site-mobile")["registry"]["title"], "Kitchen Mobile")
+
+    def test_second_dashboard_write_failure_restores_all_dashboard_targets(self):
+        class FailSecondDashboardWrite(FakeHA):
+            def __init__(self):
+                super().__init__()
+                self.attempts = 0
+
+            def save_dashboard(self, path, config, title):
+                self.attempts += 1
+                if self.attempts == 2:
+                    raise RuntimeError("synthetic second-dashboard write failure")
+                return super().save_dashboard(path, config, title)
+
+        self.write_site(self.site(site_id="atomic-site", title="Atomic Site"))
+        ha = FailSecondDashboardWrite()
+        manager = self.manager(ha)
+
+        with self.assertRaisesRegex(ProductUpdateError, "restored automatically"):
+            manager.apply(
+                self.archive,
+                self.release,
+                self.site_path,
+                "2026.9.1",
+                dashboard_targets=["wall-10", "mobile/app"],
+            )
+
+        self.assertEqual(ha.attempts, 2)
+        self.assertEqual(ha.rows, [])
+        self.assertFalse(manager.installer.target.exists())
+        self.assertFalse(manager.installer.current_receipt.exists())
+
+    def test_explicit_rollback_restores_all_dashboard_target_prestates(self):
+        self.write_site(self.site(site_id="rollback-both", title="Rollback Both"))
+        ha = FakeHA()
+        manager = self.manager(ha)
+        manager.apply(
+            self.archive,
+            self.release,
+            self.site_path,
+            "2026.9.1",
+            dashboard_targets=["wall-10", "mobile/app"],
+        )
+        self.assertEqual(len(ha.rows), 2)
+
+        result = manager.rollback()
+
+        self.assertTrue(result["readback_verified"])
+        self.assertEqual(ha.rows, [])
 
     def test_clean_install_refuses_missing_canonical_site_manifest_without_writes(self):
         ha = FakeHA()
@@ -427,7 +639,7 @@ class ProductUpdateTests(unittest.TestCase):
     def test_product_package_matches_frozen_builder22_successor_identity(self):
         self.assertEqual(
             hashlib.sha256(self.archive.read_bytes()).hexdigest(),
-            "3fdb5bbb6a9d67fe2aa25bab1c3ef715d1c9574a6235b52c997cf21cabc3a5b6",
+            "8f98971c808b8116d65473fa6d1995f2a046b3d1708f275eaea8689e8fa825b7",
         )
         self.assertEqual(self.release["sha256"], hashlib.sha256(self.archive.read_bytes()).hexdigest())
 
@@ -638,6 +850,30 @@ class ProductUpdateTests(unittest.TestCase):
             manager.apply(self.archive, self.release, self.site_path, "2028.1.0")
         self.assertEqual(ha.rows, before)
         self.assertFalse(manager.installer.target.exists())
+
+    def test_home_assistant_version_contract_accepts_minimum_and_rejects_exact_boundaries(self):
+        self.write_site(self.site())
+        supported_ha = FakeHA()
+        supported = self.manager(supported_ha)
+
+        receipt = supported.apply(self.archive, self.release, self.site_path, "2026.8.3")
+
+        self.assertEqual(receipt["state"], "clean_install")
+        self.assertEqual(supported_ha.dashboard_writes, 1)
+
+        for unsupported_version in ("2026.8.2", "2027.0.0"):
+            with self.subTest(home_assistant_version=unsupported_version):
+                ha = FakeHA()
+                manager = InstallManager(self.root / f"config-{unsupported_version}")
+                updater = ProductUpdateManager(manager, ha, "1.2.3")
+
+                with self.assertRaisesRegex(ProductUpdateError, "outside supported range"):
+                    updater.apply(self.archive, self.release, self.site_path, unsupported_version)
+
+                self.assertEqual(ha.rows, [])
+                self.assertEqual(ha.dashboard_writes, 0)
+                self.assertFalse(manager.target.exists())
+                self.assertFalse(manager.current_receipt.exists())
 
     def test_invalid_or_secret_site_manifest_is_zero_write(self):
         for site in ({"schema_version": 999}, {**self.site(), "api_token": "forbidden"}):

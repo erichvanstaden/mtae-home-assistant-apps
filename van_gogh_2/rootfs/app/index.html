@@ -57,13 +57,17 @@
     <h2>Activate this site</h2>
     <p>Enter the one-time MTAE Install Code supplied for this site. The code is exchanged once for a protected site credential and is not stored.</p>
     <label for="releaseChannel">Release channel</label><select id="releaseChannel"><option value="production">Production</option><option value="staging">Staging / test</option></select>
-    <label for="starterProfile">Starter profile</label><select id="starterProfile"><option value="wall-10">Wall-10</option><option value="mobile/app">Mobile</option></select>
+    <label for="starterProfile">Dashboard targets</label><select id="starterProfile"><option value="wall-10">Wall-10</option><option value="mobile/app">Mobile</option><option value="both">Both — Wall-10 + Mobile</option></select>
     <label for="installCode">MTAE Install Code</label><input id="installCode" type="password" autocomplete="one-time-code" placeholder="MTAE-VG-XXXX-XXXX-XXXX">
     <div class="actions"><button id="activateButton" onclick="activateSite()">Activate site</button><button id="checkButton" class="secondary" onclick="checkRelease()">Check release</button></div>
   </section>
   <section>
     <h2>Install and recovery</h2>
     <p>Install/update validates the shared product package and local site manifest, backs up and writes only Van Gogh-owned surfaces, restarts Home Assistant Core when files changed, then verifies integration, module and resource readiness. Rollback restores the recorded pre-install files and dashboard.</p>
+    <div id="targetManagement" hidden>
+      <p id="targetSummary">Dashboard targets are loading…</p>
+      <div class="actions"><button id="addWallButton" class="secondary" onclick="addDashboardTarget('wall-10')">Add Wall-10</button><button id="addMobileButton" class="secondary" onclick="addDashboardTarget('mobile/app')">Add Mobile</button></div>
+    </div>
     <div class="actions"><button id="installButton" onclick="installRelease()">Install / update</button><button class="danger" onclick="rollback()">Roll back</button><button class="secondary" onclick="restartHA()">Restart Home Assistant</button></div>
     <div class="marks"><img src="static/mtae-installer.png" alt="MTAE installer icon"><span>MTAE owner-approved artwork</span></div>
   </section>
@@ -134,6 +138,11 @@ async function refresh(showOutput=false) {
   lastStatus = data;
   activated = Boolean(data.site_credential_configured);
   if (activated) document.getElementById('installCode').value='';
+  const targets = Array.isArray(data.dashboard_targets) ? data.dashboard_targets : [];
+  document.getElementById('targetManagement').hidden = !activated;
+  document.getElementById('targetSummary').textContent = `Dashboard targets: ${targets.map(target => target === 'mobile/app' ? 'Mobile' : 'Wall-10').join(' + ') || 'none'}`;
+  document.getElementById('addWallButton').hidden = !activated || targets.includes('wall-10');
+  document.getElementById('addMobileButton').hidden = !activated || targets.includes('mobile/app');
   summary.textContent = data.installed_version ? `Installed ${data.installed_version}` : 'Not installed';
   renderOperation(data.operation);
   renderProgress(data);
@@ -156,7 +165,8 @@ async function api(path, body, initialStage) {
     updateButtons();
   }
 }
-async function activateSite(){ await api('api/activate',{install_code:document.getElementById('installCode').value,channel:document.getElementById('releaseChannel').value,profile:document.getElementById('starterProfile').value},'activating'); document.getElementById('installCode').value=''; }
+async function activateSite(){ const choice=document.getElementById('starterProfile').value; const targets=choice==='both'?['wall-10','mobile/app']:[choice]; const profile=choice==='mobile/app'?'mobile/app':'wall-10'; await api('api/activate',{install_code:document.getElementById('installCode').value,channel:document.getElementById('releaseChannel').value,profile,dashboard_targets:targets},'activating'); document.getElementById('installCode').value=''; }
+async function addDashboardTarget(target){ await api('api/dashboard-targets',{dashboard_targets:[target]},'complete'); }
 async function checkRelease(){ await api('api/check',{},'checking_release'); sessionReleaseChecked=true; renderProgress(lastStatus); updateButtons(); }
 async function installRelease(){ if(confirm('Install or update Van Gogh 2 from the verified private release, then restart Home Assistant Core to finish setup?')) await api('api/install',{},'checking_release'); }
 async function rollback(){ if(confirm('Restore the exact state from before the last successful install?')) await api('api/rollback',{confirm:'rollback'},'restoring_files'); }

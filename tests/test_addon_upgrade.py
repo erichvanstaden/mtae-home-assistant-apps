@@ -95,7 +95,7 @@ def replace_addon(source: Path, target: Path) -> None:
 class AddonUpgradeLineageTests(unittest.TestCase):
     def test_114_and_117_keep_addon_identity_mounts_and_persisted_settings(self):
         final_config = (ADDON / "config.yaml").read_text(encoding="utf-8")
-        self.assertEqual(yaml_scalar(final_config, "version"), "1.2.2")
+        self.assertEqual(yaml_scalar(final_config, "version"), "1.2.3")
         self.assertEqual(yaml_scalar(final_config, "slug"), "van_gogh_2")
         self.assertIn('homeassistant_config:rw', final_config)
 
@@ -147,7 +147,7 @@ class AddonUpgradeLineageTests(unittest.TestCase):
 
                 replace_addon(ADDON, installed)
                 candidate_digest = tree_sha256(installed)
-                self.assertEqual(yaml_scalar((installed / "config.yaml").read_text(), "version"), "1.2.2")
+                self.assertEqual(yaml_scalar((installed / "config.yaml").read_text(), "version"), "1.2.3")
                 self.assertEqual(data_file.read_bytes(), settings_bytes)
                 self.assertEqual(options_file.read_bytes(), options_bytes)
                 self.assertEqual(dashboard.read_bytes(), dashboard_bytes)

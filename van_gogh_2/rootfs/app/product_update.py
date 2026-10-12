@@ -38,6 +38,7 @@ FOUNDATION_TARGETS = {
     "frontend": Path("www") / "van-gogh2" / FRONTEND_VERSION,
     "owner_maintenance": Path("custom_components") / "mtae_owner_maintenance",
 }
+SUPPORTED_DASHBOARD_TARGETS = ("wall-10", "mobile/app")
 
 
 class ProductUpdateError(RuntimeError):
@@ -230,6 +231,38 @@ def validate_site_manifest(site: Any, package: ProductPackage) -> dict[str, Any]
         if enabled and not content:
             raise ProductUpdateError(f"Enabled feature {name} has no configured content")
     return deepcopy(site)
+
+
+def _normalise_dashboard_targets(value: Any, fallback: str) -> list[str]:
+    requested = [fallback] if value is None else value
+    if not isinstance(requested, list) or not requested:
+        raise ProductUpdateError("At least one dashboard target is required")
+    if any(
+        not isinstance(item, str) or item not in SUPPORTED_DASHBOARD_TARGETS
+        for item in requested
+    ):
+        raise ProductUpdateError("Dashboard target selection is unsupported")
+    return [target for target in SUPPORTED_DASHBOARD_TARGETS if target in requested]
+
+
+def _site_for_dashboard_target(site: dict[str, Any], profile: str) -> dict[str, Any]:
+    target = deepcopy(site)
+    site_id = str(target["site"]["id"])
+    if profile == "mobile/app":
+        target["site"]["title"] = f'{target["site"]["title"]} Mobile'
+    target["panel"] = {
+        **target["panel"],
+        "id": f"{site_id}-mobile" if profile == "mobile/app" else f"{site_id}-wall10",
+        "type": "phone" if profile == "mobile/app" else "wall",
+        "profile": profile,
+        "display_mode": "companion-app" if profile == "mobile/app" else "ha-shell",
+    }
+    return target
+
+
+def _dashboard_path(site: dict[str, Any]) -> str:
+    site_id = str(site["site"]["id"])
+    return f"{site_id}-mobile" if site["panel"]["profile"] == "mobile/app" else site_id
 
 
 def _enabled_features(site: dict[str, Any], package: ProductPackage) -> list[str]:
@@ -464,7 +497,7 @@ def plan_update(
     generated: dict[str, Any],
 ) -> ProductPlan:
     """Create a complete plan; unsupported states never become writes."""
-    target_path = str(site["site"]["id"])
+    target_path = _dashboard_path(site)
     if not PATH.fullmatch(target_path):
         raise ProductUpdateError("Canonical site id cannot be used as a dashboard path")
     target_rows = []
@@ -484,7 +517,7 @@ def plan_update(
             marker = before[PRODUCT_MARKER]
             if not isinstance(marker, dict) or marker.get("schema_version") != PRODUCT_SCHEMA_VERSION:
                 raise ProductUpdateError("Installed dashboard product schema is unsupported")
-            if marker.get("site_id") not in {None, target_path}:
+            if marker.get("site_id") not in {None, site["site"]["id"]}:
                 raise ProductUpdateError("Installed dashboard belongs to a different canonical site")
             after = _compose_dashboard(generated, before, package, site)
             return ProductPlan(
@@ -821,6 +854,7 @@ class ProductUpdateManager:
         site_manifest_path: Path,
         home_assistant_version: str,
         *,
+        dashboard_targets: list[str] | None = None,
         defer_commit: bool = False,
     ) -> dict[str, Any]:
         if self._pending_apply is not None:
@@ -840,10 +874,31 @@ class ProductUpdateManager:
         except (OSError, json.JSONDecodeError) as error:
             raise ProductUpdateError("Local site manifest cannot be read as JSON") from error
         site = validate_site_manifest(site_raw, package)
+        targets = _normalise_dashboard_targets(dashboard_targets, str(site["panel"]["profile"]))
         with tempfile.TemporaryDirectory(prefix="van-gogh-product-update-") as temporary:
-            release_root, generated = build_foundation_release(package, site_manifest_path, Path(temporary))
+            workspace = Path(temporary)
+            generated_targets: list[tuple[str, dict[str, Any], Path, dict[str, Any]]] = []
+            for index, target in enumerate(targets):
+                target_site = _site_for_dashboard_target(site, target)
+                target_manifest = workspace / f"site-{index}.json"
+                target_manifest.write_text(
+                    json.dumps(target_site, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                release_root, generated = build_foundation_release(
+                    package,
+                    target_manifest,
+                    workspace / f"target-{index}",
+                )
+                generated_targets.append((target, target_site, release_root, generated))
             inventory = self.ha.storage_dashboard_inventory()
-            plan = plan_update(package, site, inventory, generated)
+            plans = [
+                plan_update(package, target_site, inventory, generated)
+                for _target, target_site, _release_root, generated in generated_targets
+            ]
+            release_root = generated_targets[0][2]
+            states = {plan.state for plan in plans}
+            update_state = next(iter(states)) if len(states) == 1 else "mixed_update"
             current = None
             if self.installer.current_receipt.is_file():
                 try:
@@ -858,10 +913,10 @@ class ProductUpdateManager:
                 and current.get("site_manifest_sha256") == before_site_sha
                 and self._managed_files_current(package, release_root)
             )
-            if package_current and not plan.dashboard_changed:
+            if package_current and not any(plan.dashboard_changed for plan in plans):
                 return {
                     "operation": "noop",
-                    "state": plan.state,
+                    "state": update_state,
                     "package_version": package.manifest["package_version"],
                     "component_version": package.manifest["component_version"],
                     "foundation_version": package.manifest["foundation"]["version"],
@@ -869,11 +924,12 @@ class ProductUpdateManager:
                     "dashboard_writes": 0,
                     "site_manifest_writes": 0,
                     "site_manifest_sha256": before_site_sha,
+                    "dashboard_targets": targets,
                 }
-            snapshot = self.ha.dashboard_snapshot(plan.url_path)
+            snapshots = [self.ha.dashboard_snapshot(plan.url_path) for plan in plans]
             component_changed = False
             foundation_changed = False
-            dashboard_changed = False
+            dashboard_writes = 0
             install_receipt: dict[str, Any] | None = None
             foundation_rows: list[dict[str, Any]] = []
             try:
@@ -890,12 +946,14 @@ class ProductUpdateManager:
                 component_changed = True
                 foundation_rows = self._install_foundation_files(release_root, install_receipt["backup_id"])
                 foundation_changed = True
-                if plan.dashboard_changed:
+                for plan in plans:
+                    if not plan.dashboard_changed:
+                        continue
                     if plan.before is None:
                         self.ha.save_dashboard(plan.url_path, plan.after, title=plan.title)
                     else:
                         self.ha.save_existing_dashboard(plan.url_path, plan.before, plan.after)
-                    dashboard_changed = True
+                    dashboard_writes += 1
                 generated_manifest_sha = sha256_file(release_root / "release.json")
                 self.installer.annotate_current({
                     "package_version": package.manifest["package_version"],
@@ -904,14 +962,17 @@ class ProductUpdateManager:
                     "foundation_release_manifest_sha256": generated_manifest_sha,
                     "foundation_files": foundation_rows,
                     "site_manifest_sha256": before_site_sha,
-                    "dashboard_prestate": snapshot,
-                    "dashboard_path": plan.url_path,
-                    "dashboard_state": plan.state,
+                    "dashboard_prestate": snapshots[0],
+                    "dashboard_path": plans[0].url_path,
+                    "dashboard_state": update_state,
+                    "dashboard_prestates": snapshots,
+                    "dashboard_paths": [plan.url_path for plan in plans],
+                    "dashboard_targets": targets,
                 })
             except Exception as error:
                 try:
                     self._recover_apply_state(
-                        snapshot,
+                        snapshots,
                         install_receipt,
                         foundation_rows,
                         foundation_changed,
@@ -921,12 +982,14 @@ class ProductUpdateManager:
                     raise ProductUpdateError(
                         "Product update failed and exact prestate recovery failed"
                     ) from recovery_error
-                raise error
+                raise ProductUpdateError(
+                    "Product update failed; exact prestate restored automatically"
+                ) from error
             after_site_sha = site_manifest_sha256(site_manifest_path)
             if after_site_sha != before_site_sha:
                 try:
                     self._recover_apply_state(
-                        snapshot,
+                        snapshots,
                         install_receipt,
                         foundation_rows,
                         foundation_changed,
@@ -939,22 +1002,23 @@ class ProductUpdateManager:
                 raise ProductUpdateError("Local site manifest changed during update")
             result = {
                 "operation": "product_update",
-                "state": plan.state,
+                "state": update_state,
                 "package_version": package.manifest["package_version"],
                 "component_version": package.manifest["component_version"],
                 "foundation_version": package.manifest["foundation"]["version"],
                 "file_writes": int(component_changed) + len(foundation_rows),
-                "dashboard_writes": int(dashboard_changed),
+                "dashboard_writes": dashboard_writes,
                 "site_manifest_writes": 0,
                 "site_manifest_sha256": before_site_sha,
                 "rollback_available": component_changed and foundation_changed,
+                "dashboard_targets": targets,
             }
             self._pending_apply = {
                 "component_changed": component_changed,
                 "foundation_changed": foundation_changed,
                 "foundation_rows": foundation_rows,
                 "install_receipt": install_receipt,
-                "snapshot": snapshot,
+                "snapshots": snapshots,
             }
             if not defer_commit:
                 self.commit_pending_apply()
@@ -962,7 +1026,7 @@ class ProductUpdateManager:
 
     def _recover_apply_state(
         self,
-        snapshot: dict[str, Any],
+        snapshots: dict[str, Any] | list[dict[str, Any]],
         install_receipt: dict[str, Any] | None,
         foundation_rows: list[dict[str, Any]],
         foundation_changed: bool,
@@ -970,10 +1034,12 @@ class ProductUpdateManager:
     ) -> None:
         """Recover every mutable product surface before reporting a failed update."""
         recovery_errors: list[Exception] = []
-        try:
-            self.ha.restore_dashboard(snapshot)
-        except Exception as error:
-            recovery_errors.append(error)
+        dashboard_snapshots = snapshots if isinstance(snapshots, list) else [snapshots]
+        for snapshot in reversed(dashboard_snapshots):
+            try:
+                self.ha.restore_dashboard(snapshot)
+            except Exception as error:
+                recovery_errors.append(error)
         if foundation_changed and install_receipt is not None:
             try:
                 rollback_receipt = dict(install_receipt)
@@ -1004,7 +1070,7 @@ class ProductUpdateManager:
             raise ProductUpdateError("No product update transaction is pending")
         pending = self._pending_apply
         self._recover_apply_state(
-            pending["snapshot"],
+            pending["snapshots"],
             pending["install_receipt"],
             pending["foundation_rows"],
             pending["foundation_changed"],
@@ -1018,11 +1084,30 @@ class ProductUpdateManager:
         if not self.installer.current_receipt.is_file():
             raise ProductUpdateError("No product-update receipt is available to roll back")
         receipt = json.loads(self.installer.current_receipt.read_text(encoding="utf-8"))
-        snapshot = receipt.get("dashboard_prestate")
-        if not isinstance(snapshot, dict):
+        has_multi_dashboard_receipt = (
+            "dashboard_prestates" in receipt or "dashboard_paths" in receipt
+        )
+        if has_multi_dashboard_receipt:
+            if not isinstance(receipt.get("dashboard_prestate"), dict):
+                raise ProductUpdateError("Product-update receipt has no dashboard prestate")
+            if not isinstance(receipt.get("dashboard_path"), str) or not receipt["dashboard_path"]:
+                raise ProductUpdateError("Product-update receipt has no dashboard path")
+        snapshots = receipt.get("dashboard_prestates")
+        dashboard_paths = receipt.get("dashboard_paths")
+        if snapshots is None and dashboard_paths is None:
+            snapshots = [receipt.get("dashboard_prestate")]
+            dashboard_paths = [receipt.get("dashboard_path")]
+        if (
+            not isinstance(snapshots, list)
+            or not snapshots
+            or any(not isinstance(snapshot, dict) for snapshot in snapshots)
+        ):
             raise ProductUpdateError("Product-update receipt has no dashboard prestate")
-        dashboard_path = receipt.get("dashboard_path")
-        if not isinstance(dashboard_path, str) or not dashboard_path:
+        if (
+            not isinstance(dashboard_paths, list)
+            or len(dashboard_paths) != len(snapshots)
+            or any(not isinstance(path, str) or not path for path in dashboard_paths)
+        ):
             raise ProductUpdateError("Product-update receipt has no dashboard path")
         foundation_plan = self._foundation_rollback_plan(receipt)
         foundation_stages = self._stage_foundation_rollback(foundation_plan)
@@ -1031,11 +1116,11 @@ class ProductUpdateManager:
         except Exception:
             self._discard_foundation_stages(foundation_stages)
             raise
-        current_dashboard = self.ha.dashboard_snapshot(dashboard_path)
+        current_dashboards = [self.ha.dashboard_snapshot(path) for path in dashboard_paths]
         foundation_transaction: dict[str, Any] | None = None
         try:
             self.installer.apply_staged_rollback(component_transaction)
-            dashboard = self.ha.restore_dashboard(snapshot)
+            dashboards = [self.ha.restore_dashboard(snapshot) for snapshot in reversed(snapshots)]
             foundation_transaction = self._apply_staged_foundation_rollback(
                 foundation_plan,
                 foundation_stages,
@@ -1053,10 +1138,11 @@ class ProductUpdateManager:
                     recovery_errors.append(caught)
             else:
                 self._discard_foundation_stages(foundation_stages)
-            try:
-                self.ha.restore_dashboard(current_dashboard)
-            except Exception as caught:
-                recovery_errors.append(caught)
+            for current_dashboard in reversed(current_dashboards):
+                try:
+                    self.ha.restore_dashboard(current_dashboard)
+                except Exception as caught:
+                    recovery_errors.append(caught)
             if not component_transaction["committed"]:
                 try:
                     self.installer.discard_staged_rollback(component_transaction)
@@ -1069,8 +1155,11 @@ class ProductUpdateManager:
             raise
         return {
             "operation": "product_rollback",
-            "dashboard": dashboard,
+            "dashboard": dashboards[-1],
+            "dashboards": list(reversed(dashboards)),
             "foundation_files_restored": foundation_restored,
             "files": files,
-            "readback_verified": bool(dashboard.get("readback_verified")),
+            "readback_verified": all(
+                bool(dashboard.get("readback_verified")) for dashboard in dashboards
+            ),
         }

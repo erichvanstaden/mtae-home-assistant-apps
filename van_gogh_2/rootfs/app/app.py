@@ -26,8 +26,9 @@ OPERATION_LOCK = threading.Lock()
 DEFAULT_RELEASE_ENDPOINT = os.environ.get(
     "VAN_GOGH_RELEASE_ENDPOINT", "https://installer.mtae.com.au"
 ).rstrip("/")
-INSTALLER_VERSION = "1.2.2"
+INSTALLER_VERSION = "1.2.3"
 PRODUCT_PACKAGE_SCHEMA = "mtae.van-gogh.product-package.v1"
+SUPPORTED_DASHBOARD_TARGETS = ("wall-10", "mobile/app")
 
 
 def _load_operation_state() -> dict[str, Any]:
@@ -120,6 +121,38 @@ def _site_manifest_profile() -> str | None:
     return str(profile)
 
 
+def _normalise_dashboard_targets(value: Any) -> list[str]:
+    if not isinstance(value, list) or not value:
+        raise InstallError("Select at least one supported dashboard target")
+    targets: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or item not in SUPPORTED_DASHBOARD_TARGETS:
+            raise InstallError("Unsupported dashboard target")
+        if item not in targets:
+            targets.append(item)
+    return [target for target in SUPPORTED_DASHBOARD_TARGETS if target in targets]
+
+
+def _dashboard_targets() -> list[str]:
+    settings = _settings()
+    configured = settings.get("dashboard_targets")
+    if configured is not None:
+        return _normalise_dashboard_targets(configured)
+    profile = _site_manifest_profile()
+    return [profile] if profile in SUPPORTED_DASHBOARD_TARGETS else []
+
+
+def _set_dashboard_targets(value: Any) -> list[str]:
+    settings = _settings()
+    if not settings.get("credential") or not SITE_MANIFEST.is_file():
+        raise InstallError("Activate this site before selecting dashboard targets")
+    requested = _normalise_dashboard_targets(value)
+    targets = _normalise_dashboard_targets([*_dashboard_targets(), *requested])
+    settings["dashboard_targets"] = targets
+    _atomic_settings(settings)
+    return targets
+
+
 def _commit_activation(activated: dict[str, Any]) -> str:
     """Persist activation and create a neutral manifest only when none exists."""
     supplied_manifest = activated.get("site_manifest")
@@ -135,6 +168,7 @@ def _commit_activation(activated: dict[str, Any]) -> str:
     ):
         raise InstallError("Activation returned an invalid neutral starter manifest")
     settings_payload = {key: value for key, value in activated.items() if key != "site_manifest"}
+    settings_payload["dashboard_targets"] = [str(panel["profile"])]
     before_settings = SETTINGS.read_bytes() if SETTINGS.is_file() else None
     created_manifest = not SITE_MANIFEST.exists()
     try:
@@ -232,6 +266,7 @@ def _status() -> dict[str, Any]:
         "product_package_schema": PRODUCT_PACKAGE_SCHEMA,
         "site_manifest_path": str(SITE_MANIFEST),
         "site_manifest_available": SITE_MANIFEST.is_file(),
+        "dashboard_targets": _dashboard_targets() if current.get("credential") else [],
     }
 
 
@@ -320,6 +355,9 @@ class Handler(BaseHTTPRequestHandler):
                 install_code = str(payload.get("install_code", ""))
                 channel = str(payload.get("channel", "production"))
                 profile = _site_manifest_profile() or str(payload.get("profile", "wall-10"))
+                requested_targets = _normalise_dashboard_targets(
+                    payload.get("dashboard_targets", [profile])
+                )
                 activated = ReleaseClient.activate(
                     DEFAULT_RELEASE_ENDPOINT,
                     install_code,
@@ -327,6 +365,7 @@ class Handler(BaseHTTPRequestHandler):
                     profile,
                 )
                 starter_manifest_state = _commit_activation(activated)
+                dashboard_targets = _set_dashboard_targets(requested_targets)
                 result: dict[str, Any] = {
                     "activated": True,
                     "site_id": activated["site_id"],
@@ -334,6 +373,7 @@ class Handler(BaseHTTPRequestHandler):
                     "channel": activated["channel"],
                     "profile": activated["profile"],
                     "starter_manifest": starter_manifest_state,
+                    "dashboard_targets": dashboard_targets,
                     "credential_returned": False,
                     "install_code_stored": False,
                 }
@@ -346,6 +386,12 @@ class Handler(BaseHTTPRequestHandler):
                         f"{activated['site_name']}"
                     ),
                 )
+            elif path == "/api/dashboard-targets":
+                try:
+                    selected = _set_dashboard_targets(payload.get("dashboard_targets"))
+                except ValueError as error:
+                    raise InstallError(str(error)) from error
+                result = {"dashboard_targets": selected}
             elif path == "/api/check":
                 operation_id = _operation_begin("release_check", "checking_release")
                 manifest = _validate_product_release_manifest(_release_client().latest())
@@ -384,6 +430,7 @@ class Handler(BaseHTTPRequestHandler):
                             manifest,
                             SITE_MANIFEST,
                             core_version,
+                            dashboard_targets=_dashboard_targets(),
                             defer_commit=True,
                         )
                     receipt: dict[str, Any] | None = None

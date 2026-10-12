@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.3
+
+- Add `Both — Wall-10 + Mobile` at clean activation and additive `Add Mobile`/`Add Wall-10` controls for an already activated site without another Install Code exchange.
+- Install the canonical seven-route Wall-10 dashboard and canonical eleven-route Mobile dashboard at deterministic, non-colliding storage paths from one preserved site manifest.
+- Snapshot and restore every selected dashboard as one transaction so a second-target generation or write failure cannot leave a partial install.
+- Ship the byte-identical Builder.22 product runtime as package `1.0.0-builder.22-deployable.5`, scoped to Installer `1.2.3`, while retaining Home Assistant `2026.8.3` through `<2027.0.0` support.
+- Preserve Wall-only and Mobile-only onboarding, activation security, local bindings, unrelated Home Assistant state, no-op, rollback, and zero equipment actuation.
+
 ## 1.2.2
 
 - Ship corrected Builder.22 successor package `1.0.0-builder.22-deployable.4`, component `2.0.0-builder.3`, Foundation `1.5.0`, and frontend assets `2.0.0-suite.1` as an unpublished candidate with a fail-closed neutral profile contract: Wall-10 remains its canonical seven routes and Mobile remains its canonical eleven routes.

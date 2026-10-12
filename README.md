@@ -18,8 +18,8 @@ This repository contains the **MTAE Van Gogh Installer** application shell. It d
 
 4. Install **MTAE Van Gogh Installer**.
 5. Start the app and open its Web UI.
-6. Choose the authorised release channel and `Wall-10` or `Mobile` starter, enter the one-time MTAE Install Code, then select **Activate site**. The permanent HTTPS endpoint is built into the App.
-7. On a clean system, activation creates `/config/van_gogh2-site.json` from the package-owned neutral starter. An existing valid manifest remains authoritative and is preserved byte-for-byte. Select **Check release** and **Install / update**. This unpublished Installer `1.2.2` candidate accepts private product package `1.0.0-builder.22-deployable.4`, carrying component `2.0.0-builder.3`, Foundation `1.5.0`, and frontend assets `2.0.0-suite.1`.
+6. Choose the authorised release channel and `Wall-10`, `Mobile`, or `Both`, enter the one-time MTAE Install Code, then select **Activate site**. The permanent HTTPS endpoint is built into the App. On an already activated Wall-10 site, select **Add Mobile**; this does not repeat activation or replace the canonical site manifest.
+7. On a clean system, activation creates `/config/van_gogh2-site.json` from the package-owned neutral starter. An existing valid manifest remains authoritative and is preserved byte-for-byte. Select **Check release** and **Install / update**. This unpublished Installer `1.2.3` candidate accepts private product package `1.0.0-builder.22-deployable.5`, carrying component `2.0.0-builder.3`, Foundation `1.5.0`, and frontend assets `2.0.0-suite.1`.
 
 ## What the Installer does
 
@@ -27,9 +27,9 @@ This repository contains the **MTAE Van Gogh Installer** application shell. It d
 - downloads only an authorised, versioned product package;
 - verifies the outer release SHA-256 and the package's complete internal inventory before extraction;
 - validates the site-neutral package and the commissioned local site manifest before any write;
-- snapshots the affected Van Gogh-owned component, resource and dashboard state;
+- snapshots the affected Van Gogh-owned component, resource and all selected dashboard states;
 - installs or updates `/config/custom_components/van_gogh2` and its frontend module;
-- applies the supported dashboard plan while preserving local names, bindings, routes and unrelated views/cards;
+- applies Wall-10, Mobile, or both supported dashboard plans while preserving local names, bindings, routes and unrelated views/cards;
 - restarts Home Assistant Core when required and verifies readiness;
 - returns an exact-current no-op only when all managed bytes and dashboard state match the authorised package;
 - supports deterministic rollback to the recorded pre-install state.
