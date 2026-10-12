@@ -50,25 +50,28 @@ class NeutralOnboardingTests(unittest.TestCase):
             OPERATION_STATE={"id": 0, "state": "idle", "status": "idle"},
         )
 
-    def test_clean_activation_creates_neutral_manifest_and_protected_settings(self):
+    def test_clean_activation_creates_neutral_manifest_and_minimal_protected_settings(self):
         with tempfile.TemporaryDirectory() as temporary, self.paths(Path(temporary)):
-            state = app._commit_activation(activation("mobile/app"))
+            state = app._commit_activation(activation("wall-10"))
             self.assertEqual(state, "created_neutral")
             manifest = json.loads(app.SITE_MANIFEST.read_text(encoding="utf-8"))
             settings = json.loads(app.SETTINGS.read_text(encoding="utf-8"))
-            self.assertEqual(manifest["panel"]["profile"], "mobile/app")
+            self.assertEqual(manifest["panel"]["profile"], "wall-10")
+            self.assertEqual(set(settings), {"credential", "site_id", "site_name"})
             self.assertNotIn("site_manifest", settings)
-            self.assertEqual(settings["channel"], "staging")
+            self.assertNotIn("channel", settings)
+            self.assertNotIn("profile", settings)
+            self.assertNotIn("dashboard_targets", settings)
             self.assertEqual(stat.S_IMODE(app.SITE_MANIFEST.stat().st_mode), 0o600)
             self.assertEqual(stat.S_IMODE(app.SETTINGS.stat().st_mode), 0o600)
 
-    def test_installer_ui_offers_both_on_activation_and_add_mobile_after_activation(self):
+    def test_installer_ui_has_no_profile_channel_or_dashboard_target_controls(self):
         html = (APP / "index.html").read_text(encoding="utf-8")
-
-        self.assertIn('value="both">Both — Wall-10 + Mobile</option>', html)
-        self.assertIn('id="addMobileButton"', html)
-        self.assertIn('>Add Mobile</button>', html)
-        self.assertIn("api/dashboard-targets", html)
+        self.assertNotIn("dashboard-targets", html)
+        self.assertNotIn("addMobileButton", html)
+        self.assertNotIn("releaseChannel", html)
+        self.assertNotIn("starterProfile", html)
+        self.assertIn("Dashboard creation and editing happen only in Builder", html)
 
     def test_existing_manifest_is_preserved_exactly(self):
         with tempfile.TemporaryDirectory() as temporary, self.paths(Path(temporary)):
@@ -87,73 +90,17 @@ class NeutralOnboardingTests(unittest.TestCase):
             with self.assertRaises(InstallError):
                 app._site_manifest_profile()
 
-    def test_status_does_not_return_credential(self):
+    def test_status_does_not_return_credential_or_removed_installer_selections(self):
         with tempfile.TemporaryDirectory() as temporary, self.paths(Path(temporary)):
             app._commit_activation(activation())
             status = app._status()
             self.assertNotIn("credential", status)
             self.assertNotIn("test-credential", json.dumps(status, sort_keys=True))
+            self.assertNotIn("channel", status)
+            self.assertNotIn("profile", status)
+            self.assertNotIn("dashboard_targets", status)
 
-    def test_activated_wall_can_add_mobile_without_reactivation_or_manifest_change(self):
-        with tempfile.TemporaryDirectory() as temporary, self.paths(Path(temporary)):
-            app._commit_activation(activation("wall-10"))
-            manifest_before = app.SITE_MANIFEST.read_bytes()
-            settings_before = json.loads(app.SETTINGS.read_text(encoding="utf-8"))
-
-            with mock.patch.object(
-                app.ReleaseClient,
-                "activate",
-                side_effect=AssertionError("target selection must not repeat activation"),
-            ):
-                selected = app._set_dashboard_targets(["wall-10", "mobile/app"])
-
-            settings_after = json.loads(app.SETTINGS.read_text(encoding="utf-8"))
-            self.assertEqual(selected, ["wall-10", "mobile/app"])
-            self.assertEqual(settings_after["dashboard_targets"], selected)
-            self.assertEqual(settings_after["credential"], settings_before["credential"])
-            self.assertEqual(app.SITE_MANIFEST.read_bytes(), manifest_before)
-            self.assertEqual(app._status()["dashboard_targets"], selected)
-            self.assertNotIn("credential", app._status())
-
-    def test_dashboard_target_selection_is_additive(self):
-        with tempfile.TemporaryDirectory() as temporary, self.paths(Path(temporary)):
-            app._commit_activation(activation("wall-10"))
-            app._set_dashboard_targets(["wall-10", "mobile/app"])
-
-            selected = app._set_dashboard_targets(["wall-10"])
-
-            self.assertEqual(selected, ["wall-10", "mobile/app"])
-
-    def test_dashboard_target_endpoint_updates_an_activated_site_without_code_exchange(self):
-        with tempfile.TemporaryDirectory() as temporary, self.paths(Path(temporary)):
-            app._commit_activation(activation("wall-10"))
-            manifest_before = app.SITE_MANIFEST.read_bytes()
-            server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
-            worker = threading.Thread(target=server.serve_forever, daemon=True)
-            worker.start()
-            try:
-                payload = json.dumps({"dashboard_targets": ["wall-10", "mobile/app"]}).encode()
-                post = request.Request(
-                    f"http://127.0.0.1:{server.server_port}/api/dashboard-targets",
-                    data=payload,
-                    headers={"Content-Type": "application/json"},
-                    method="POST",
-                )
-                with mock.patch.object(
-                    app.ReleaseClient,
-                    "activate",
-                    side_effect=AssertionError("target selection must not repeat activation"),
-                ):
-                    response = json.loads(request.urlopen(post, timeout=5).read())
-            finally:
-                server.shutdown()
-                server.server_close()
-                worker.join(timeout=5)
-
-            self.assertEqual(response["dashboard_targets"], ["wall-10", "mobile/app"])
-            self.assertEqual(app.SITE_MANIFEST.read_bytes(), manifest_before)
-
-    def test_one_activation_can_select_both_dashboard_targets(self):
+    def test_activation_ignores_removed_client_selectors_and_uses_server_bootstrap_contract(self):
         with tempfile.TemporaryDirectory() as temporary, self.paths(Path(temporary)):
             server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
             worker = threading.Thread(target=server.serve_forever, daemon=True)
@@ -162,7 +109,7 @@ class NeutralOnboardingTests(unittest.TestCase):
                 payload = json.dumps({
                     "install_code": "MTAE-VG-TEST",
                     "channel": "staging",
-                    "profile": "wall-10",
+                    "profile": "mobile/app",
                     "dashboard_targets": ["wall-10", "mobile/app"],
                 }).encode()
                 post = request.Request(
@@ -185,45 +132,41 @@ class NeutralOnboardingTests(unittest.TestCase):
             activate.assert_called_once_with(
                 "https://installer.mtae.com.au",
                 "MTAE-VG-TEST",
-                "staging",
+                "production",
                 "wall-10",
             )
-            self.assertEqual(response["dashboard_targets"], ["wall-10", "mobile/app"])
-            self.assertEqual(app._status()["dashboard_targets"], ["wall-10", "mobile/app"])
+            self.assertNotIn("dashboard_targets", response)
+            self.assertNotIn("channel", app._status())
 
-    def test_invalid_dashboard_target_fails_before_activation_code_exchange(self):
+    def test_removed_dashboard_target_endpoint_is_404_and_state_safe(self):
         with tempfile.TemporaryDirectory() as temporary, self.paths(Path(temporary)):
+            app._commit_activation(activation("wall-10"))
+            manifest_before = app.SITE_MANIFEST.read_bytes()
+            settings_before = app.SETTINGS.read_bytes()
             server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
             worker = threading.Thread(target=server.serve_forever, daemon=True)
             worker.start()
             try:
-                payload = json.dumps({
-                    "install_code": "MTAE-VG-TEST",
-                    "channel": "staging",
-                    "profile": "wall-10",
-                    "dashboard_targets": ["unsupported"],
-                }).encode()
                 post = request.Request(
-                    f"http://127.0.0.1:{server.server_port}/api/activate",
-                    data=payload,
+                    f"http://127.0.0.1:{server.server_port}/api/dashboard-targets",
+                    data=b'{"dashboard_targets":["mobile/app"]}',
                     headers={"Content-Type": "application/json"},
                     method="POST",
                 )
-                with mock.patch.object(app.ReleaseClient, "activate") as activate:
-                    with self.assertRaises(error.HTTPError) as response:
-                        request.urlopen(post, timeout=5)
+                with self.assertRaises(error.HTTPError) as response:
+                    request.urlopen(post, timeout=5)
             finally:
                 server.shutdown()
                 server.server_close()
                 worker.join(timeout=5)
 
-            self.assertEqual(response.exception.code, 400)
-            activate.assert_not_called()
+            self.assertEqual(response.exception.code, 404)
+            self.assertEqual(app.SITE_MANIFEST.read_bytes(), manifest_before)
+            self.assertEqual(app.SETTINGS.read_bytes(), settings_before)
 
-    def test_install_forwards_saved_dashboard_targets_to_product_update(self):
+    def test_install_uses_builder_owned_orchestration_without_dashboard_targets(self):
         with tempfile.TemporaryDirectory() as temporary, self.paths(Path(temporary)):
             app._commit_activation(activation("wall-10"))
-            app._set_dashboard_targets(["wall-10", "mobile/app"])
             captured: dict[str, object] = {}
 
             class FakeReleaseClient:
@@ -235,17 +178,19 @@ class NeutralOnboardingTests(unittest.TestCase):
 
             class FakeUpdater:
                 def __init__(self, manager, ha, installer_version):
-                    pass
+                    captured["installer_version"] = installer_version
 
-                def apply(self, *args, **kwargs):
-                    captured.update(kwargs)
-                    return {"operation": "noop", "file_writes": 0}
+                def apply_builder_owned(self, *args, **kwargs):
+                    captured["args"] = args
+                    captured["kwargs"] = kwargs
+                    return {"operation": "noop", "file_writes": 0, "readiness": {"builder_owned": True}}
 
             manager = mock.Mock()
             manager.current_receipt = Path(temporary) / "missing-receipt.json"
             ha = mock.Mock()
-            ha.wait_ready.return_value = {"version": "2026.8.0"}
+            ha.wait_ready.return_value = {"version": "2026.9.1"}
             ha.snapshot.return_value = {"resources": []}
+            ha.finish_setup.return_value = {"builder_dashboard": {"path": "van-gogh-builder"}}
             server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
             worker = threading.Thread(target=server.serve_forever, daemon=True)
             worker.start()
@@ -261,20 +206,112 @@ class NeutralOnboardingTests(unittest.TestCase):
                     mock.patch.object(
                         app,
                         "_validate_product_release_manifest",
-                        return_value={"version": "1.2.3", "module_url": "unused"},
+                        return_value={
+                            "version": "2.0.0-builder.3",
+                            "module_url": "/local/van-gogh2/2.0.0-suite.1/van-gogh2.js",
+                        },
                     ),
                     mock.patch.object(app, "module_url_for_release", return_value="unused"),
                     mock.patch.object(app, "InstallManager", return_value=manager),
                     mock.patch.object(app.HAClient, "from_environment", return_value=ha),
                     mock.patch.object(app, "ProductUpdateManager", FakeUpdater),
                 ):
-                    request.urlopen(post, timeout=5).read()
+                    response = json.loads(request.urlopen(post, timeout=5).read())
             finally:
                 server.shutdown()
                 server.server_close()
                 worker.join(timeout=5)
 
-            self.assertEqual(captured["dashboard_targets"], ["wall-10", "mobile/app"])
+            self.assertTrue(response["installed"])
+            self.assertEqual(captured["installer_version"], "1.2.4")
+            self.assertEqual(captured["kwargs"], {"defer_commit": True})
+            self.assertEqual(captured["args"][3], "2026.9.1")
+            self.assertFalse(any("target" in str(value).lower() for value in captured["kwargs"].values()))
+            ha.finish_setup.assert_called_once()
+
+    def test_noop_builder_entry_migration_records_exact_rollback_prestate(self):
+        with tempfile.TemporaryDirectory() as temporary, self.paths(Path(temporary)):
+            app._commit_activation(activation("wall-10"))
+
+            class FakeReleaseClient:
+                def latest(self):
+                    return {}
+
+                def download(self, manifest, destination):
+                    destination.write_bytes(b"package")
+
+            class FakeUpdater:
+                def __init__(self, manager, ha, installer_version):
+                    pass
+
+                def apply_builder_owned(self, *args, **kwargs):
+                    return {"operation": "noop", "file_writes": 0}
+
+            prestate = {
+                "entries": [],
+                "resources": [],
+                "builder_dashboard": {
+                    "url_path": "van-gogh-builder",
+                    "exists": True,
+                    "registry": {"id": "van_gogh_builder"},
+                    "config": {"views": [{"path": "builder", "cards": []}]},
+                },
+            }
+            manager = mock.Mock()
+            manager.current_receipt = Path(temporary) / "current.json"
+            manager.current_receipt.write_text("{}", encoding="utf-8")
+            manager.annotate_current.return_value = {"recorded": True}
+            ha = mock.Mock()
+            ha.wait_ready.return_value = {"version": "2026.9.1"}
+            ha.snapshot.return_value = prestate
+            ha.finish_setup.return_value = {
+                "builder_dashboard": {
+                    "url_path": "van-gogh-builder",
+                    "migrated": True,
+                    "dashboard_writes": 1,
+                }
+            }
+            server = app.ThreadingHTTPServer(("127.0.0.1", 0), app.Handler)
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            try:
+                post = request.Request(
+                    f"http://127.0.0.1:{server.server_port}/api/install",
+                    data=b"{}",
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with (
+                    mock.patch.object(app, "_release_client", return_value=FakeReleaseClient()),
+                    mock.patch.object(
+                        app,
+                        "_validate_product_release_manifest",
+                        return_value={
+                            "version": "2.0.0-builder.3",
+                            "module_url": "/local/van-gogh2/2.0.0-suite.1/van-gogh2.js",
+                        },
+                    ),
+                    mock.patch.object(app, "module_url_for_release", return_value="unused"),
+                    mock.patch.object(app, "InstallManager", return_value=manager),
+                    mock.patch.object(app.HAClient, "from_environment", return_value=ha),
+                    mock.patch.object(app, "ProductUpdateManager", FakeUpdater),
+                ):
+                    response = json.loads(request.urlopen(post, timeout=5).read())
+            finally:
+                server.shutdown()
+                server.server_close()
+                worker.join(timeout=5)
+
+            self.assertTrue(response["installed"])
+            readiness = ha.finish_setup.return_value
+            self.assertIn("restart_cycle", readiness)
+            manager.annotate_current.assert_called_once_with(
+                {
+                    "ha_prestate": prestate,
+                    "readiness": readiness,
+                    "restart_required": False,
+                }
+            )
 
 
 if __name__ == "__main__":

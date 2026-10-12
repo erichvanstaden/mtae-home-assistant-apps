@@ -164,7 +164,7 @@ class ProductUpdateTests(unittest.TestCase):
         return hashlib.sha256(self.site_path.read_bytes()).hexdigest()
 
     def manager(self, ha):
-        return ProductUpdateManager(InstallManager(self.config), ha, "1.2.3")
+        return ProductUpdateManager(InstallManager(self.config), ha, "1.2.4")
 
     def apply(self, manager):
         return manager.apply(self.archive, self.release, self.site_path, "2026.9.1")
@@ -331,7 +331,7 @@ class ProductUpdateTests(unittest.TestCase):
 
     def test_package_is_deterministic_site_neutral_and_identity_separated(self):
         package = inspect_package(self.archive, self.release["sha256"])
-        self.assertEqual(package.manifest["package_version"], "1.0.0-builder.22-deployable.5")
+        self.assertEqual(package.manifest["package_version"], "1.0.0-builder.22-deployable.6")
         self.assertEqual(package.manifest["component_version"], "2.0.0-builder.3")
         self.assertEqual(package.manifest["foundation"]["version"], "1.5.0")
         self.assertNotEqual(package.manifest["package_version"], package.manifest["component_version"])
@@ -447,74 +447,6 @@ class ProductUpdateTests(unittest.TestCase):
             ["bounded-both", "bounded-both-mobile", "owner-dashboard"],
         )
 
-    def test_offline_122_activated_wall_state_adds_mobile_without_reactivation(self):
-        site = self.site(site_id="offline-upgrade", title="Offline Upgrade")
-        site["panel"].update({
-            "profile": "wall-10",
-            "type": "wall",
-            "display_mode": "ha-shell",
-        })
-        site_bytes = json.dumps(site, indent=2, sort_keys=True).encode("utf-8") + b"\n"
-        self.site_path.write_bytes(site_bytes)
-        data_root = self.root / "data"
-        data_root.mkdir()
-        settings_path = data_root / "settings.json"
-        credential = "[REDACTED]"
-        settings_path.write_text(
-            json.dumps({
-                "channel": "production",
-                "credential": credential,
-                "profile": "wall-10",
-                "site_id": "offline-upgrade",
-                "site_name": "Offline Upgrade",
-            }, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        archive_before = hashlib.sha256(self.archive.read_bytes()).hexdigest()
-        release_before = hashlib.sha256(
-            (ROOT / "dist" / "RELEASE-MANIFEST.json").read_bytes()
-        ).hexdigest()
-
-        with (
-            patch.multiple(
-                installer_app,
-                DATA_ROOT=data_root,
-                SETTINGS=settings_path,
-                CONFIG_ROOT=self.config,
-                SITE_MANIFEST=self.site_path,
-            ),
-            patch.object(
-                installer_app.ReleaseClient,
-                "activate",
-                side_effect=AssertionError("upgrade must not repeat activation"),
-            ) as activate,
-        ):
-            targets = installer_app._set_dashboard_targets(["mobile/app"])
-
-        ha = FakeHA()
-        receipt = self.manager(ha).apply(
-            self.archive,
-            self.release,
-            self.site_path,
-            "2026.9.1",
-            dashboard_targets=targets,
-        )
-
-        activate.assert_not_called()
-        self.assertEqual(targets, ["wall-10", "mobile/app"])
-        self.assertEqual(receipt["dashboard_targets"], targets)
-        self.assertEqual(
-            sorted(row["registry"]["url_path"] for row in ha.rows),
-            ["offline-upgrade", "offline-upgrade-mobile"],
-        )
-        self.assertEqual([len(row["config"]["views"]) for row in ha.rows], [7, 11])
-        self.assertEqual(self.site_path.read_bytes(), site_bytes)
-        self.assertEqual(json.loads(settings_path.read_text())["credential"], credential)
-        self.assertEqual(hashlib.sha256(self.archive.read_bytes()).hexdigest(), archive_before)
-        self.assertEqual(
-            hashlib.sha256((ROOT / "dist" / "RELEASE-MANIFEST.json").read_bytes()).hexdigest(),
-            release_before,
-        )
 
     def test_mobile_dashboard_uses_site_title_with_mobile_suffix(self):
         self.write_site(self.site(site_id="dual-site", title="Kitchen"))
@@ -639,7 +571,7 @@ class ProductUpdateTests(unittest.TestCase):
     def test_product_package_matches_frozen_builder22_successor_identity(self):
         self.assertEqual(
             hashlib.sha256(self.archive.read_bytes()).hexdigest(),
-            "8f98971c808b8116d65473fa6d1995f2a046b3d1708f275eaea8689e8fa825b7",
+            "ac8f67341f965cf24923f21b55fd069bea210b842bd3ab5d2ff454b2bf40e128",
         )
         self.assertEqual(self.release["sha256"], hashlib.sha256(self.archive.read_bytes()).hexdigest())
 
@@ -933,6 +865,51 @@ class ProductUpdateTests(unittest.TestCase):
         self.assertEqual(manager.installer.installed_version(), "1.9.9")
         for key, relative in FOUNDATION_TARGETS.items():
             self.assertEqual((self.config / relative / "old.txt").read_text(), f"{key}-prestate")
+
+    def test_builder_owned_rollback_restores_files_without_dashboard_prestates(self):
+        self.write_site(self.site())
+        component = self.config / "custom_components" / "van_gogh2"
+        component.mkdir(parents=True)
+        (component / "manifest.json").write_text(
+            json.dumps({"domain": "van_gogh2", "version": "1.9.9"})
+        )
+        (component / "old.txt").write_text("component-prestate")
+        for key, relative in FOUNDATION_TARGETS.items():
+            target = self.config / relative
+            target.mkdir(parents=True)
+            (target / "old.txt").write_text(f"{key}-prestate")
+        ha = FakeHA([self.current_row()[0]])
+        rows_before = copy.deepcopy(ha.rows)
+        component_before = self.tree_snapshot(component)
+        foundation_before = {
+            key: self.tree_snapshot(self.config / relative)
+            for key, relative in FOUNDATION_TARGETS.items()
+        }
+        manager = self.manager(ha)
+
+        applied = manager.apply_builder_owned(
+            self.archive,
+            self.release,
+            self.site_path,
+            "2026.9.1",
+        )
+        self.assertEqual(applied["dashboard_owner"], "builder")
+        self.assertEqual(applied["dashboard_writes"], 0)
+
+        rolled_back = manager.rollback()
+
+        self.assertTrue(rolled_back["readback_verified"])
+        self.assertIsNone(rolled_back["dashboard"])
+        self.assertEqual(rolled_back["dashboards"], [])
+        self.assertEqual(ha.rows, rows_before)
+        self.assertEqual(self.tree_snapshot(component), component_before)
+        self.assertEqual(
+            {
+                key: self.tree_snapshot(self.config / relative)
+                for key, relative in FOUNDATION_TARGETS.items()
+            },
+            foundation_before,
+        )
 
     def test_rollback_missing_first_foundation_backup_is_zero_write(self):
         self.write_site(self.site())

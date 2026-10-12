@@ -113,22 +113,27 @@ class Installer110ContractTests(unittest.TestCase):
         ):
             self.assertEqual(result[key], manifest[key])
 
-    def test_ha_client_exposes_product_dashboard_writer_not_legacy_builder_bootstrap(self):
+    def test_ha_client_exposes_product_writer_and_builder_entry_bootstrap(self):
         self.assertTrue(callable(getattr(HAClient, "save_dashboard", None)))
-        self.assertFalse(hasattr(HAClient, "ensure_builder_dashboard"))
+        self.assertTrue(callable(getattr(HAClient, "ensure_builder_dashboard", None)))
 
-    def test_finish_setup_uses_builtin_local_assets_without_config_entry(self):
+    def test_finish_setup_uses_local_assets_and_creates_only_builder_entry(self):
         client = HAClient(token="test")
         client.wait_ready = lambda: {"version": "2026.8.3"}
         client.ensure_config_entry = lambda: self.fail("config entry must not be created")
         client.ensure_resource = lambda module_url: {"url": module_url, "count": 1}
         client.probe_module = lambda module_url: {"url": module_url, "status": 200}
+        client.ensure_builder_dashboard = lambda: {
+            "url_path": "van-gogh-builder",
+            "readback_verified": True,
+        }
 
         module_url = "/local/van-gogh2/2.0.0-suite.1/van-gogh2.js"
         result = client.finish_setup(module_url)
 
         self.assertEqual(result["integration"], {"required": False, "state": "not_required"})
         self.assertEqual(result["resource"]["url"], module_url)
+        self.assertEqual(result["builder_dashboard"]["url_path"], "van-gogh-builder")
 
 
     def test_wrong_product_identity_or_digest_is_rejected(self):

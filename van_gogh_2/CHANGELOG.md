@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.4
+
+- Remove Installer dashboard-profile and target selection controls; activation is a neutral production bootstrap.
+- Install runtime/Foundation files without creating or editing owner dashboards.
+- Create only the protected `/van-gogh-builder/builder` entry route and hand dashboard creation, selection, page changes and deletion to Builder.22 package `1.0.0-builder.22-deployable.6` (component `2.0.0-builder.3`).
+- Preserve exact pre-install runtime, resource, config-entry and Builder-route state for rollback.
+
 ## 1.2.3
 
 - Add `Both — Wall-10 + Mobile` at clean activation and additive `Add Mobile`/`Add Wall-10` controls for an already activated site without another Install Code exchange.

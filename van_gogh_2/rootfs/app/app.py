@@ -26,9 +26,8 @@ OPERATION_LOCK = threading.Lock()
 DEFAULT_RELEASE_ENDPOINT = os.environ.get(
     "VAN_GOGH_RELEASE_ENDPOINT", "https://installer.mtae.com.au"
 ).rstrip("/")
-INSTALLER_VERSION = "1.2.3"
+INSTALLER_VERSION = "1.2.4"
 PRODUCT_PACKAGE_SCHEMA = "mtae.van-gogh.product-package.v1"
-SUPPORTED_DASHBOARD_TARGETS = ("wall-10", "mobile/app")
 
 
 def _load_operation_state() -> dict[str, Any]:
@@ -99,6 +98,16 @@ def _operation_snapshot() -> dict[str, Any]:
         return dict(OPERATION_STATE)
 
 
+def _no_restart_cycle() -> dict[str, Any]:
+    """Record that an idempotent readiness repair required no Core restart."""
+    return {
+        "request_state": "not_required",
+        "http_status": None,
+        "down_observed": False,
+        "ready_observed": True,
+    }
+
+
 def _atomic_settings(payload: dict[str, Any]) -> None:
     DATA_ROOT.mkdir(parents=True, exist_ok=True)
     temporary = SETTINGS.with_name(".settings.tmp")
@@ -121,38 +130,6 @@ def _site_manifest_profile() -> str | None:
     return str(profile)
 
 
-def _normalise_dashboard_targets(value: Any) -> list[str]:
-    if not isinstance(value, list) or not value:
-        raise InstallError("Select at least one supported dashboard target")
-    targets: list[str] = []
-    for item in value:
-        if not isinstance(item, str) or item not in SUPPORTED_DASHBOARD_TARGETS:
-            raise InstallError("Unsupported dashboard target")
-        if item not in targets:
-            targets.append(item)
-    return [target for target in SUPPORTED_DASHBOARD_TARGETS if target in targets]
-
-
-def _dashboard_targets() -> list[str]:
-    settings = _settings()
-    configured = settings.get("dashboard_targets")
-    if configured is not None:
-        return _normalise_dashboard_targets(configured)
-    profile = _site_manifest_profile()
-    return [profile] if profile in SUPPORTED_DASHBOARD_TARGETS else []
-
-
-def _set_dashboard_targets(value: Any) -> list[str]:
-    settings = _settings()
-    if not settings.get("credential") or not SITE_MANIFEST.is_file():
-        raise InstallError("Activate this site before selecting dashboard targets")
-    requested = _normalise_dashboard_targets(value)
-    targets = _normalise_dashboard_targets([*_dashboard_targets(), *requested])
-    settings["dashboard_targets"] = targets
-    _atomic_settings(settings)
-    return targets
-
-
 def _commit_activation(activated: dict[str, Any]) -> str:
     """Persist activation and create a neutral manifest only when none exists."""
     supplied_manifest = activated.get("site_manifest")
@@ -167,8 +144,11 @@ def _commit_activation(activated: dict[str, Any]) -> str:
         or panel.get("profile") not in {"wall-10", "mobile/app"}
     ):
         raise InstallError("Activation returned an invalid neutral starter manifest")
-    settings_payload = {key: value for key, value in activated.items() if key != "site_manifest"}
-    settings_payload["dashboard_targets"] = [str(panel["profile"])]
+    settings_payload = {
+        key: activated[key]
+        for key in ("credential", "site_id", "site_name")
+        if key in activated
+    }
     before_settings = SETTINGS.read_bytes() if SETTINGS.is_file() else None
     created_manifest = not SITE_MANIFEST.exists()
     try:
@@ -266,7 +246,8 @@ def _status() -> dict[str, Any]:
         "product_package_schema": PRODUCT_PACKAGE_SCHEMA,
         "site_manifest_path": str(SITE_MANIFEST),
         "site_manifest_available": SITE_MANIFEST.is_file(),
-        "dashboard_targets": _dashboard_targets() if current.get("credential") else [],
+        "builder_route": "/van-gogh-builder/builder",
+        "dashboard_owner": "builder",
     }
 
 
@@ -353,27 +334,21 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/activate":
                 operation_id = _operation_begin("activation", "activating")
                 install_code = str(payload.get("install_code", ""))
-                channel = str(payload.get("channel", "production"))
-                profile = _site_manifest_profile() or str(payload.get("profile", "wall-10"))
-                requested_targets = _normalise_dashboard_targets(
-                    payload.get("dashboard_targets", [profile])
-                )
+                profile = _site_manifest_profile() or "wall-10"
                 activated = ReleaseClient.activate(
                     DEFAULT_RELEASE_ENDPOINT,
                     install_code,
-                    channel,
+                    "production",
                     profile,
                 )
                 starter_manifest_state = _commit_activation(activated)
-                dashboard_targets = _set_dashboard_targets(requested_targets)
                 result: dict[str, Any] = {
                     "activated": True,
                     "site_id": activated["site_id"],
                     "site_name": activated["site_name"],
-                    "channel": activated["channel"],
-                    "profile": activated["profile"],
                     "starter_manifest": starter_manifest_state,
-                    "dashboard_targets": dashboard_targets,
+                    "builder_route": "/van-gogh-builder/builder",
+                    "dashboard_owner": "builder",
                     "credential_returned": False,
                     "install_code_stored": False,
                 }
@@ -386,12 +361,6 @@ class Handler(BaseHTTPRequestHandler):
                         f"{activated['site_name']}"
                     ),
                 )
-            elif path == "/api/dashboard-targets":
-                try:
-                    selected = _set_dashboard_targets(payload.get("dashboard_targets"))
-                except ValueError as error:
-                    raise InstallError(str(error)) from error
-                result = {"dashboard_targets": selected}
             elif path == "/api/check":
                 operation_id = _operation_begin("release_check", "checking_release")
                 manifest = _validate_product_release_manifest(_release_client().latest())
@@ -425,12 +394,11 @@ class Handler(BaseHTTPRequestHandler):
                         client.download(manifest, archive)
                         _operation_update(operation_id, "applying_product_update")
                         updater = ProductUpdateManager(manager, ha, INSTALLER_VERSION)
-                        product_result = updater.apply(
+                        product_result = updater.apply_builder_owned(
                             archive,
                             manifest,
                             SITE_MANIFEST,
                             core_version,
-                            dashboard_targets=_dashboard_targets(),
                             defer_commit=True,
                         )
                     receipt: dict[str, Any] | None = None
@@ -476,8 +444,44 @@ class Handler(BaseHTTPRequestHandler):
                             raise InstallError(
                                 f"Install finalisation failed; automatic rollback completed: {error}"
                             ) from error
-                    elif manager.current_receipt.is_file():
-                        receipt = json.loads(manager.current_receipt.read_text(encoding="utf-8"))
+                    else:
+                        # A byte-current package can still be upgrading from an
+                        # Installer release which did not create the Builder entry.
+                        # Re-run the idempotent readiness gate so the dedicated
+                        # Builder entry is repaired without touching owner pages.
+                        try:
+                            _operation_update(operation_id, "verifying_readiness")
+                            readiness = ha.finish_setup(manifest["module_url"])
+                            readiness["restart_cycle"] = _no_restart_cycle()
+                            product_result["readiness"] = readiness
+                            builder_result = readiness.get("builder_dashboard") or {}
+                            ha_changed = bool(builder_result.get("dashboard_writes"))
+                            if ha_changed and not manager.current_receipt.is_file():
+                                raise InstallError(
+                                    "Builder entry changed but no rollback receipt is available"
+                                )
+                            if manager.current_receipt.is_file():
+                                annotation = {
+                                    "readiness": readiness,
+                                    "restart_required": False,
+                                }
+                                if ha_changed:
+                                    annotation["ha_prestate"] = prestate
+                                receipt = manager.annotate_current(annotation)
+                        except Exception as error:
+                            try:
+                                _operation_update(operation_id, "automatic_rollback")
+                                ha.restore_prestate(prestate)
+                            except Exception as rollback_error:
+                                raise InstallError(
+                                    "Readiness verification failed and exact Home Assistant "
+                                    "prestate recovery failed "
+                                    f"({type(rollback_error).__name__})"
+                                ) from rollback_error
+                            raise InstallError(
+                                "Readiness verification failed; exact Home Assistant prestate "
+                                f"restored automatically: {error}"
+                            ) from error
                     result = {
                         "installed": True,
                         "product_update": product_result,
@@ -508,7 +512,9 @@ class Handler(BaseHTTPRequestHandler):
                     current = json.loads(manager.current_receipt.read_text(encoding="utf-8"))
                     prestate = current.get("ha_prestate")
                     ha = HAClient.from_environment()
-                    if ha is not None and isinstance(current.get("dashboard_prestate"), dict):
+                    if current.get("dashboard_owner") == "builder" or (
+                        ha is not None and isinstance(current.get("dashboard_prestate"), dict)
+                    ):
                         product_rollback = ProductUpdateManager(
                             manager,
                             ha,

@@ -847,6 +847,25 @@ class ProductUpdateManager:
             raise
         return stages
 
+    def apply_builder_owned(
+        self,
+        archive: Path,
+        release: dict[str, Any],
+        site_manifest_path: Path,
+        home_assistant_version: str,
+        *,
+        defer_commit: bool = False,
+    ) -> dict[str, Any]:
+        """Install runtime/Foundation files while Builder owns all user dashboards."""
+        return self.apply(
+            archive,
+            release,
+            site_manifest_path,
+            home_assistant_version,
+            defer_commit=defer_commit,
+            builder_owned=True,
+        )
+
     def apply(
         self,
         archive: Path,
@@ -856,6 +875,7 @@ class ProductUpdateManager:
         *,
         dashboard_targets: list[str] | None = None,
         defer_commit: bool = False,
+        builder_owned: bool = False,
     ) -> dict[str, Any]:
         if self._pending_apply is not None:
             raise ProductUpdateError("A previous product update transaction is still pending")
@@ -891,14 +911,20 @@ class ProductUpdateManager:
                     workspace / f"target-{index}",
                 )
                 generated_targets.append((target, target_site, release_root, generated))
-            inventory = self.ha.storage_dashboard_inventory()
-            plans = [
-                plan_update(package, target_site, inventory, generated)
-                for _target, target_site, _release_root, generated in generated_targets
-            ]
+            plans = []
+            if not builder_owned:
+                inventory = self.ha.storage_dashboard_inventory()
+                plans = [
+                    plan_update(package, target_site, inventory, generated)
+                    for _target, target_site, _release_root, generated in generated_targets
+                ]
             release_root = generated_targets[0][2]
             states = {plan.state for plan in plans}
-            update_state = next(iter(states)) if len(states) == 1 else "mixed_update"
+            update_state = (
+                "builder_owned"
+                if builder_owned
+                else next(iter(states)) if len(states) == 1 else "mixed_update"
+            )
             current = None
             if self.installer.current_receipt.is_file():
                 try:
@@ -914,7 +940,7 @@ class ProductUpdateManager:
                 and self._managed_files_current(package, release_root)
             )
             if package_current and not any(plan.dashboard_changed for plan in plans):
-                return {
+                result = {
                     "operation": "noop",
                     "state": update_state,
                     "package_version": package.manifest["package_version"],
@@ -924,8 +950,12 @@ class ProductUpdateManager:
                     "dashboard_writes": 0,
                     "site_manifest_writes": 0,
                     "site_manifest_sha256": before_site_sha,
-                    "dashboard_targets": targets,
                 }
+                if builder_owned:
+                    result["dashboard_owner"] = "builder"
+                else:
+                    result["dashboard_targets"] = targets
+                return result
             snapshots = [self.ha.dashboard_snapshot(plan.url_path) for plan in plans]
             component_changed = False
             foundation_changed = False
@@ -955,20 +985,25 @@ class ProductUpdateManager:
                         self.ha.save_existing_dashboard(plan.url_path, plan.before, plan.after)
                     dashboard_writes += 1
                 generated_manifest_sha = sha256_file(release_root / "release.json")
-                self.installer.annotate_current({
+                annotation = {
                     "package_version": package.manifest["package_version"],
                     "package_schema": package.manifest["schema"],
                     "foundation_version": package.manifest["foundation"]["version"],
                     "foundation_release_manifest_sha256": generated_manifest_sha,
                     "foundation_files": foundation_rows,
                     "site_manifest_sha256": before_site_sha,
-                    "dashboard_prestate": snapshots[0],
-                    "dashboard_path": plans[0].url_path,
                     "dashboard_state": update_state,
-                    "dashboard_prestates": snapshots,
-                    "dashboard_paths": [plan.url_path for plan in plans],
-                    "dashboard_targets": targets,
-                })
+                    "dashboard_owner": "builder" if builder_owned else "installer",
+                }
+                if not builder_owned:
+                    annotation.update({
+                        "dashboard_prestate": snapshots[0],
+                        "dashboard_path": plans[0].url_path,
+                        "dashboard_prestates": snapshots,
+                        "dashboard_paths": [plan.url_path for plan in plans],
+                        "dashboard_targets": targets,
+                    })
+                self.installer.annotate_current(annotation)
             except Exception as error:
                 try:
                     self._recover_apply_state(
@@ -1011,8 +1046,11 @@ class ProductUpdateManager:
                 "site_manifest_writes": 0,
                 "site_manifest_sha256": before_site_sha,
                 "rollback_available": component_changed and foundation_changed,
-                "dashboard_targets": targets,
             }
+            if builder_owned:
+                result["dashboard_owner"] = "builder"
+            else:
+                result["dashboard_targets"] = targets
             self._pending_apply = {
                 "component_changed": component_changed,
                 "foundation_changed": foundation_changed,
@@ -1084,31 +1122,36 @@ class ProductUpdateManager:
         if not self.installer.current_receipt.is_file():
             raise ProductUpdateError("No product-update receipt is available to roll back")
         receipt = json.loads(self.installer.current_receipt.read_text(encoding="utf-8"))
+        builder_owned = receipt.get("dashboard_owner") == "builder"
         has_multi_dashboard_receipt = (
             "dashboard_prestates" in receipt or "dashboard_paths" in receipt
         )
-        if has_multi_dashboard_receipt:
+        if has_multi_dashboard_receipt and not builder_owned:
             if not isinstance(receipt.get("dashboard_prestate"), dict):
                 raise ProductUpdateError("Product-update receipt has no dashboard prestate")
             if not isinstance(receipt.get("dashboard_path"), str) or not receipt["dashboard_path"]:
                 raise ProductUpdateError("Product-update receipt has no dashboard path")
-        snapshots = receipt.get("dashboard_prestates")
-        dashboard_paths = receipt.get("dashboard_paths")
-        if snapshots is None and dashboard_paths is None:
-            snapshots = [receipt.get("dashboard_prestate")]
-            dashboard_paths = [receipt.get("dashboard_path")]
-        if (
-            not isinstance(snapshots, list)
-            or not snapshots
-            or any(not isinstance(snapshot, dict) for snapshot in snapshots)
-        ):
-            raise ProductUpdateError("Product-update receipt has no dashboard prestate")
-        if (
-            not isinstance(dashboard_paths, list)
-            or len(dashboard_paths) != len(snapshots)
-            or any(not isinstance(path, str) or not path for path in dashboard_paths)
-        ):
-            raise ProductUpdateError("Product-update receipt has no dashboard path")
+        if builder_owned:
+            snapshots: list[dict[str, Any]] = []
+            dashboard_paths: list[str] = []
+        else:
+            snapshots = receipt.get("dashboard_prestates")
+            dashboard_paths = receipt.get("dashboard_paths")
+            if snapshots is None and dashboard_paths is None:
+                snapshots = [receipt.get("dashboard_prestate")]
+                dashboard_paths = [receipt.get("dashboard_path")]
+            if (
+                not isinstance(snapshots, list)
+                or not snapshots
+                or any(not isinstance(snapshot, dict) for snapshot in snapshots)
+            ):
+                raise ProductUpdateError("Product-update receipt has no dashboard prestate")
+            if (
+                not isinstance(dashboard_paths, list)
+                or len(dashboard_paths) != len(snapshots)
+                or any(not isinstance(path, str) or not path for path in dashboard_paths)
+            ):
+                raise ProductUpdateError("Product-update receipt has no dashboard path")
         foundation_plan = self._foundation_rollback_plan(receipt)
         foundation_stages = self._stage_foundation_rollback(foundation_plan)
         try:
@@ -1155,7 +1198,7 @@ class ProductUpdateManager:
             raise
         return {
             "operation": "product_rollback",
-            "dashboard": dashboards[-1],
+            "dashboard": dashboards[-1] if dashboards else None,
             "dashboards": list(reversed(dashboards)),
             "foundation_files_restored": foundation_restored,
             "files": files,

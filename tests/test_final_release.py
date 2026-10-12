@@ -8,7 +8,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 ADDON = ROOT / "van_gogh_2"
 APP = ADDON / "rootfs" / "app"
-BUILDER22_SUCCESSOR_SHA256 = "8f98971c808b8116d65473fa6d1995f2a046b3d1708f275eaea8689e8fa825b7"
+BUILDER22_DONOR_SHA256 = "8f98971c808b8116d65473fa6d1995f2a046b3d1708f275eaea8689e8fa825b7"
 
 
 def assignment_string(path: Path, name: str) -> str:
@@ -34,18 +34,18 @@ class FinalReleaseIdentityTests(unittest.TestCase):
         config = ADDON / "config.yaml"
         self.assertEqual(yaml_scalar(config, "name"), "MTAE Van Gogh Installer")
         self.assertEqual(yaml_scalar(config, "slug"), "van_gogh_2")
-        self.assertEqual(yaml_scalar(config, "version"), "1.2.3")
+        self.assertEqual(yaml_scalar(config, "version"), "1.2.4")
 
     def test_runtime_reports_final_installer_version(self):
-        self.assertEqual(assignment_string(APP / "app.py", "INSTALLER_VERSION"), "1.2.3")
+        self.assertEqual(assignment_string(APP / "app.py", "INSTALLER_VERSION"), "1.2.4")
 
     def test_frozen_builder22_successor_is_the_release_payload(self):
         release = json.loads((ROOT / "dist" / "RELEASE-MANIFEST.json").read_text(encoding="utf-8"))
         archive = ROOT / "dist" / release["archive"]
         digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-        self.assertEqual(digest, BUILDER22_SUCCESSOR_SHA256)
-        self.assertEqual(release["sha256"], BUILDER22_SUCCESSOR_SHA256)
-        self.assertEqual(release["package_version"], "1.0.0-builder.22-deployable.5")
+        self.assertEqual(release["sha256"], digest)
+        self.assertEqual(release["predecessor_package_sha256"], BUILDER22_DONOR_SHA256)
+        self.assertEqual(release["package_version"], "1.0.0-builder.22-deployable.6")
         self.assertEqual(release["component_version"], "2.0.0-builder.3")
         self.assertEqual(
             release["module_url"],
@@ -84,8 +84,8 @@ class FinalReleaseIdentityTests(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         changelog = (ADDON / "CHANGELOG.md").read_text(encoding="utf-8")
         for source in (readme, changelog):
-            self.assertIn("1.2.3", source)
-            self.assertIn("1.0.0-builder.22-deployable.5", source)
+            self.assertIn("1.2.4", source)
+            self.assertIn("1.0.0-builder.22-deployable.6", source)
             self.assertIn("2.0.0-builder.3", source)
         self.assertNotIn("Installer 1.1.17 accepts only", readme)
         self.assertNotIn("Migrate Home C-grid", readme)

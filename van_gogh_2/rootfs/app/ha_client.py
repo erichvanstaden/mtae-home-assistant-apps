@@ -18,7 +18,37 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 DOMAIN = "van_gogh2"
-MODULE_URL = "/van-gogh2-assets/2.0.0-staging.2/van-gogh2.js"
+MODULE_URL = "/local/van-gogh2/2.0.0-suite.1/van-gogh2.js"
+BUILDER_DASHBOARD_PATH = "van-gogh-builder"
+BUILDER_DASHBOARD_TITLE = "Van Gogh Builder"
+
+
+def builder_dashboard_config() -> dict[str, Any]:
+    """Return the sole Installer-owned dashboard: the Builder entry surface."""
+    return {
+        "views": [
+            {
+                "title": BUILDER_DASHBOARD_TITLE,
+                "path": "builder",
+                "icon": "mdi:palette-outline",
+                "cards": [{"type": "custom:van-gogh2-builder-card"}],
+            }
+        ]
+    }
+
+
+def _installer_1_1_17_builder_dashboard_config() -> dict[str, Any]:
+    """Return the exact published Installer 1.1.17 Builder entry config."""
+    return {
+        "views": [
+            {
+                "title": "Van Gogh Builder",
+                "path": "builder",
+                "icon": "mdi:palette-outline",
+                "cards": [{"type": "custom:van-gogh-builder-card"}],
+            }
+        ]
+    }
 RELEASE_VERSION_PATTERN = re.compile(
     r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
     r"(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?"
@@ -662,6 +692,53 @@ class HAClient:
         """Create one product dashboard using the verified generic storage writer."""
         return self.save_review_dashboard(url_path, config, title=title, icon=icon)
 
+    def ensure_builder_dashboard(self) -> dict[str, Any]:
+        """Create or migrate the Builder route without overwriting owner edits."""
+        before = self.dashboard_snapshot(BUILDER_DASHBOARD_PATH)
+        if before["exists"]:
+            current = builder_dashboard_config()
+            if before.get("config") == current:
+                return {
+                    "created": False,
+                    "migrated": False,
+                    "dashboard_writes": 0,
+                    "url_path": BUILDER_DASHBOARD_PATH,
+                    "owner_route": f"/{BUILDER_DASHBOARD_PATH}/builder",
+                    "preserved_existing": True,
+                    "readback_verified": True,
+                }
+            legacy = _installer_1_1_17_builder_dashboard_config()
+            if before.get("config") == legacy:
+                result = self.save_existing_dashboard(
+                    BUILDER_DASHBOARD_PATH,
+                    legacy,
+                    current,
+                )
+                return {
+                    **result,
+                    "created": False,
+                    "migrated": True,
+                    "migrated_from_installer": "1.1.17",
+                    "owner_route": f"/{BUILDER_DASHBOARD_PATH}/builder",
+                    "preserved_existing": False,
+                }
+            raise HAError(
+                "Van Gogh readiness failed: unrecognised Builder dashboard collision; "
+                "existing dashboard preserved"
+            )
+        result = self.save_review_dashboard(
+            BUILDER_DASHBOARD_PATH,
+            builder_dashboard_config(),
+            title=BUILDER_DASHBOARD_TITLE,
+        )
+        return {
+            **result,
+            "migrated": False,
+            "dashboard_writes": 1,
+            "owner_route": f"/{BUILDER_DASHBOARD_PATH}/builder",
+            "preserved_existing": False,
+        }
+
     def restore_dashboard(self, snapshot: dict[str, Any]) -> dict[str, Any]:
         """Restore the exact dashboard state captured by ``dashboard_snapshot``."""
         url_path = str(snapshot.get("url_path") or "")
@@ -693,7 +770,12 @@ class HAClient:
             for key in ("url_path", "title", "icon", "show_in_sidebar", "require_admin", "mode"):
                 if (after.get("registry") or {}).get(key) != expected_registry.get(key):
                     raise HAError("Review dashboard rollback registry readback failed")
-        return {"url_path": url_path, "exists": bool(after.get("exists")), "readback_verified": True}
+        return {
+            "url_path": url_path,
+            "exists": bool(after.get("exists")),
+            "dashboard_writes": 1,
+            "readback_verified": True,
+        }
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -707,6 +789,7 @@ class HAClient:
                 for item in self.resources()
                 if _is_van_gogh_resource(item)
             ],
+            "builder_dashboard": self.dashboard_snapshot(BUILDER_DASHBOARD_PATH),
         }
 
     def ensure_config_entry(self) -> dict[str, Any]:
@@ -800,6 +883,9 @@ class HAClient:
             raise HAError("Van Gogh frontend module URL is invalid")
         config = self.wait_ready()
         entry = {"required": False, "state": "not_required"}
+        # Classify the single owned route before touching any other HA surface so
+        # an unknown/owner-edited collision fails closed with zero writes.
+        builder_dashboard = self.ensure_builder_dashboard()
         resource = self.ensure_resource(module_url)
         module = self.probe_module(module_url)
         return {
@@ -807,6 +893,7 @@ class HAClient:
             "integration": entry,
             "resource": resource,
             "module": module,
+            "builder_dashboard": builder_dashboard,
         }
 
     def restore_resources(self, snapshot: list[dict[str, Any]]) -> dict[str, Any]:
@@ -852,8 +939,15 @@ class HAClient:
         if actual_ids != expected_ids:
             raise HAError("Van Gogh config entry rollback readback did not match prestate")
         resources = self.restore_resources(expected_resources)
+        builder_snapshot = snapshot.get("builder_dashboard")
+        builder_dashboard = (
+            self.restore_dashboard(builder_snapshot)
+            if isinstance(builder_snapshot, dict)
+            else {"restored": False, "reason": "legacy prestate omitted Builder dashboard"}
+        )
         return {
             "config_entry_ids": actual_ids,
             "resources": resources,
+            "builder_dashboard": builder_dashboard,
             "readback_verified": True,
         }

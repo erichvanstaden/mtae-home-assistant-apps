@@ -1,15 +1,11 @@
 from __future__ import annotations
 
 import hashlib
-import io
 import json
 import os
 from pathlib import Path
-from pathlib import PurePosixPath
 import shutil
-import subprocess
 import sys
-import tarfile
 import tempfile
 import unittest
 from unittest import mock
@@ -18,6 +14,11 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 ADDON = ROOT / "van_gogh_2"
 APP_ROOT = ADDON / "rootfs" / "app"
+TASK_ROOT = ROOT.parent
+DONOR_ADDONS = (
+    ("1.1.17", TASK_ROOT / ".scratch" / "installer-1.1.17-source" / "van_gogh_2"),
+    ("1.2.3", TASK_ROOT / ".scratch" / "installer-1.2.3-source" / "van_gogh_2"),
+)
 sys.path.insert(0, str(APP_ROOT))
 os.environ.setdefault("VAN_GOGH_DATA_ROOT", tempfile.mkdtemp(prefix="vg-upgrade-data-"))
 os.environ.setdefault("VAN_GOGH_CONFIG_ROOT", tempfile.mkdtemp(prefix="vg-upgrade-config-"))
@@ -31,17 +32,6 @@ def yaml_scalar(text: str, key: str) -> str:
         if raw.startswith(prefix):
             return raw.split(":", 1)[1].strip().strip('"').strip("'")
     raise AssertionError(f"{key} is missing")
-
-
-def tagged_config(tag: str) -> str:
-    result = subprocess.run(
-        ["git", "show", f"{tag}:van_gogh_2/config.yaml"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return result.stdout
 
 
 def tree_sha256(root: Path) -> str:
@@ -59,33 +49,6 @@ def tree_sha256(root: Path) -> str:
     return digest.hexdigest()
 
 
-def export_tagged_addon(tag: str, destination: Path) -> Path:
-    archive = subprocess.run(
-        ["git", "archive", "--format=tar", tag, "van_gogh_2"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-    ).stdout
-    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as bundle:
-        for member in bundle.getmembers():
-            relative = PurePosixPath(member.name)
-            if relative.is_absolute() or ".." in relative.parts or relative.parts[:1] != ("van_gogh_2",):
-                raise AssertionError(f"unsafe tagged path: {member.name}")
-            target = destination.joinpath(*relative.parts)
-            if member.isdir():
-                target.mkdir(parents=True, exist_ok=True)
-            elif member.isfile():
-                source = bundle.extractfile(member)
-                if source is None:
-                    raise AssertionError(f"missing tagged bytes: {member.name}")
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(source.read())
-                target.chmod(member.mode & 0o777)
-            else:
-                raise AssertionError(f"unsupported tagged member: {member.name}")
-    return destination / "van_gogh_2"
-
-
 def replace_addon(source: Path, target: Path) -> None:
     if target.exists():
         shutil.rmtree(target)
@@ -93,9 +56,13 @@ def replace_addon(source: Path, target: Path) -> None:
 
 
 class AddonUpgradeLineageTests(unittest.TestCase):
-    def test_114_and_117_keep_addon_identity_mounts_and_persisted_settings(self):
+    def setUp(self):
+        for version, source in DONOR_ADDONS:
+            self.assertTrue(source.is_dir(), f"frozen Installer {version} donor is missing: {source}")
+
+    def test_117_and_123_keep_addon_identity_mounts_and_persisted_settings(self):
         final_config = (ADDON / "config.yaml").read_text(encoding="utf-8")
-        self.assertEqual(yaml_scalar(final_config, "version"), "1.2.3")
+        self.assertEqual(yaml_scalar(final_config, "version"), "1.2.4")
         self.assertEqual(yaml_scalar(final_config, "slug"), "van_gogh_2")
         self.assertIn('homeassistant_config:rw', final_config)
 
@@ -106,9 +73,9 @@ class AddonUpgradeLineageTests(unittest.TestCase):
         }
         encoded = (json.dumps(preserved, sort_keys=True) + "\n").encode("utf-8")
 
-        for tag, version in (("v1.1.14", "1.1.14"), ("v1.1.17", "1.1.17")):
-            with self.subTest(tag=tag), tempfile.TemporaryDirectory() as temporary:
-                baseline = tagged_config(tag)
+        for version, donor in DONOR_ADDONS:
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as temporary:
+                baseline = (donor / "config.yaml").read_text(encoding="utf-8")
                 self.assertEqual(yaml_scalar(baseline, "version"), version)
                 self.assertEqual(yaml_scalar(baseline, "slug"), "van_gogh_2")
                 self.assertIn('homeassistant_config:rw', baseline)
@@ -122,15 +89,16 @@ class AddonUpgradeLineageTests(unittest.TestCase):
                     self.assertEqual(app._settings(), preserved)
                 self.assertEqual(settings.read_bytes(), before)
 
-    def test_114_and_117_upgrade_rollback_and_identical_reinstall_are_state_safe(self):
+    def test_117_and_123_upgrade_rollback_and_identical_reinstall_are_state_safe(self):
         settings_bytes = b'{"credential":"[REDACTED]","site_id":"site-preserved"}\n'
         options_bytes = b'{"release_endpoint":"https://release.example.invalid"}\n'
         dashboard_bytes = b'{"title":"Protected pre-existing dashboard"}\n'
 
-        for tag in ("v1.1.14", "v1.1.17"):
-            with self.subTest(tag=tag), tempfile.TemporaryDirectory() as temporary:
+        for version, donor in DONOR_ADDONS:
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
-                baseline = export_tagged_addon(tag, root / "baseline")
+                baseline = root / "baseline" / "van_gogh_2"
+                shutil.copytree(donor, baseline)
                 installed = root / "supervisor" / "addons" / "van_gogh_2"
                 data_root = root / "supervisor" / "data"
                 data_file = data_root / "settings.json"
@@ -147,7 +115,7 @@ class AddonUpgradeLineageTests(unittest.TestCase):
 
                 replace_addon(ADDON, installed)
                 candidate_digest = tree_sha256(installed)
-                self.assertEqual(yaml_scalar((installed / "config.yaml").read_text(), "version"), "1.2.3")
+                self.assertEqual(yaml_scalar((installed / "config.yaml").read_text(), "version"), "1.2.4")
                 self.assertEqual(data_file.read_bytes(), settings_bytes)
                 self.assertEqual(options_file.read_bytes(), options_bytes)
                 self.assertEqual(dashboard.read_bytes(), dashboard_bytes)
@@ -164,13 +132,17 @@ class AddonUpgradeLineageTests(unittest.TestCase):
                 self.assertEqual(options_file.read_bytes(), options_bytes)
                 self.assertEqual(dashboard.read_bytes(), dashboard_bytes)
 
-    def test_candidate_is_descended_from_public_117_release(self):
-        result = subprocess.run(
-            ["git", "merge-base", "--is-ancestor", "v1.1.17", "HEAD"],
-            cwd=ROOT,
-            check=False,
+    def test_frozen_donor_identities_match_task_control(self):
+        control = json.loads((TASK_ROOT / "DONOR-BASELINES.json").read_text(encoding="utf-8"))
+        donors = control["immutable_donors"]
+        self.assertEqual(
+            donors["installer_1_1_17_rollback"]["commit"],
+            "ba78736542c44161637a84fa4913e9fc058794d2",
         )
-        self.assertEqual(result.returncode, 0)
+        self.assertEqual(
+            donors["installer_1_2_3"]["commit"],
+            "50179fd8738059cd09ae47a09e156342e796974e",
+        )
 
 
 if __name__ == "__main__":

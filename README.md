@@ -18,8 +18,12 @@ This repository contains the **MTAE Van Gogh Installer** application shell. It d
 
 4. Install **MTAE Van Gogh Installer**.
 5. Start the app and open its Web UI.
-6. Choose the authorised release channel and `Wall-10`, `Mobile`, or `Both`, enter the one-time MTAE Install Code, then select **Activate site**. The permanent HTTPS endpoint is built into the App. On an already activated Wall-10 site, select **Add Mobile**; this does not repeat activation or replace the canonical site manifest.
-7. On a clean system, activation creates `/config/van_gogh2-site.json` from the package-owned neutral starter. An existing valid manifest remains authoritative and is preserved byte-for-byte. Select **Check release** and **Install / update**. This unpublished Installer `1.2.3` candidate accepts private product package `1.0.0-builder.22-deployable.5`, carrying component `2.0.0-builder.3`, Foundation `1.5.0`, and frontend assets `2.0.0-suite.1`.
+6. Enter the one-time MTAE Install Code, then select **Activate site**. Activation uses the approved production bootstrap; there is no Installer profile or dashboard-target selector.
+7. On a clean system, activation creates `/config/van_gogh2-site.json` from the package-owned neutral starter. An existing valid manifest remains authoritative and is preserved byte-for-byte. Select **Check release**, **Install / update**, then **Launch Builder**. This unpublished Installer `1.2.4` candidate accepts private product package `1.0.0-builder.22-deployable.6`, carrying component `2.0.0-builder.3`, Foundation `1.5.0`, and frontend assets `2.0.0-suite.1`.
+
+## Ownership boundary
+
+The Installer activates the site, verifies and installs the compatible runtime package, protects rollback state, registers the frontend resource, and creates only the `/van-gogh-builder/builder` control entry. Builder owns dashboard creation, selection, page changes, editing and deletion. The Installer has no dashboard-target API.
 
 ## What the Installer does
 
@@ -27,11 +31,12 @@ This repository contains the **MTAE Van Gogh Installer** application shell. It d
 - downloads only an authorised, versioned product package;
 - verifies the outer release SHA-256 and the package's complete internal inventory before extraction;
 - validates the site-neutral package and the commissioned local site manifest before any write;
-- snapshots the affected Van Gogh-owned component, resource and all selected dashboard states;
+- snapshots the affected Van Gogh-owned component, frontend resource, config entry and Builder entry state;
 - installs or updates `/config/custom_components/van_gogh2` and its frontend module;
-- applies Wall-10, Mobile, or both supported dashboard plans while preserving local names, bindings, routes and unrelated views/cards;
-- restarts Home Assistant Core when required and verifies readiness;
-- returns an exact-current no-op only when all managed bytes and dashboard state match the authorised package;
+- creates the protected Builder control route without overwriting an existing route;
+- restarts Home Assistant Core when required and verifies runtime, resource and Builder readiness;
+- leaves every owner dashboard untouched until Builder performs an explicit owner action;
+- returns an exact-current no-op only when all managed runtime bytes match the authorised package;
 - supports deterministic rollback to the recorded pre-install state.
 
 ## Security boundaries

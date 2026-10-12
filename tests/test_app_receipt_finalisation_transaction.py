@@ -69,7 +69,16 @@ class FakeHA:
         return {"version": "2026.9.4"}
 
     def snapshot(self):
-        return {"entries": [], "resources": []}
+        return {
+            "entries": [],
+            "resources": [],
+            "builder_dashboard": {
+                "url_path": "van-gogh-builder",
+                "exists": False,
+                "registry": None,
+                "config": None,
+            },
+        }
 
     def storage_dashboard_inventory(self):
         return copy.deepcopy(self.rows)
@@ -135,14 +144,41 @@ class FakeHA:
         return {"synthetic": True}
 
     def finish_setup(self, version):
+        self.rows.append(
+            {
+                "registry": {
+                    "id": "van_gogh_builder",
+                    "url_path": "van-gogh-builder",
+                    "title": "Van Gogh Builder",
+                    "mode": "storage",
+                },
+                "config": {
+                    "views": [{"path": "builder", "cards": [{"type": "custom:van-gogh2-builder-card"}]}]
+                },
+            }
+        )
         return {
             "integration": {"state": "loaded"},
             "resource": {"count": 1},
             "module": {"status": 200},
+            "builder_dashboard": {"url_path": "van-gogh-builder", "readback_verified": True},
         }
 
     def restore_prestate(self, prestate):
         self.restore_prestate_count += 1
+        builder = prestate.get("builder_dashboard", {})
+        self.rows = [
+            row
+            for row in self.rows
+            if row["registry"]["url_path"] != "van-gogh-builder"
+        ]
+        if builder.get("exists"):
+            self.rows.append(
+                {
+                    "registry": copy.deepcopy(builder["registry"]),
+                    "config": copy.deepcopy(builder["config"]),
+                }
+            )
         return {"readback_verified": True}
 
 
