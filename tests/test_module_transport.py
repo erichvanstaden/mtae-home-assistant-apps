@@ -10,7 +10,10 @@ from unittest import mock
 APP = Path(__file__).resolve().parents[1] / "van_gogh_2" / "rootfs" / "app"
 sys.path.insert(0, str(APP))
 
-from ha_client import HAClient  # noqa: E402
+from ha_client import HAClient, HAError, module_url_for_release, validate_module_url  # noqa: E402
+
+
+CACHE_SAFE_URL = "/local/van-gogh2/2.0.0-suite.1/van-gogh2.js?v=2.0.0-builder.5"
 
 
 class TestDirectCoreModuleTransport(unittest.TestCase):
@@ -51,7 +54,7 @@ class TestDirectCoreModuleTransport(unittest.TestCase):
                 "ha_client.urllib.request.build_opener", return_value=direct_opener
             ) as build_opener,
         ):
-            result = client.probe_module(timeout=0)
+            result = client.probe_module(CACHE_SAFE_URL, timeout=0)
 
         self.assertEqual(result["status"], 200)
         ambient_urlopen.assert_not_called()
@@ -59,6 +62,22 @@ class TestDirectCoreModuleTransport(unittest.TestCase):
         handler = build_opener.call_args.args[0]
         self.assertEqual(handler.proxies, {})
         direct_opener.open.assert_called_once()
+
+    def test_component_version_becomes_exact_cache_key(self) -> None:
+        self.assertEqual(module_url_for_release("2.0.0-builder.5"), CACHE_SAFE_URL)
+        self.assertEqual(validate_module_url(CACHE_SAFE_URL), CACHE_SAFE_URL)
+
+    def test_unsafe_or_unversioned_urls_are_rejected(self) -> None:
+        rejected = (
+            "/local/van-gogh2/2.0.0-suite.1/van-gogh2.js",
+            "/local/van-gogh2/../van-gogh2.js?v=2.0.0-builder.5",
+            "/local/van-gogh2/2.0.0-suite.1/van-gogh2.js?v=2.0.0-builder.5&x=1",
+            "/local/van-gogh2/2.0.0-suite.1/van-gogh2.js?v=../../escape",
+            "https://example.invalid/van-gogh2.js?v=2.0.0-builder.5",
+        )
+        for value in rejected:
+            with self.subTest(value=value), self.assertRaises(HAError):
+                validate_module_url(value)
 
 
 if __name__ == "__main__":

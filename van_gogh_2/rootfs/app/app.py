@@ -11,7 +11,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from ha_client import HAClient, HAError, HARestartPending, module_url_for_release
+from ha_client import (
+    HAClient,
+    HAError,
+    HARestartPending,
+    module_url_for_release,
+    validate_module_url,
+)
 from installer import InstallError, InstallManager, ReleaseClient
 from product_update import ProductUpdateError, ProductUpdateManager
 
@@ -26,7 +32,7 @@ OPERATION_LOCK = threading.Lock()
 DEFAULT_RELEASE_ENDPOINT = os.environ.get(
     "VAN_GOGH_RELEASE_ENDPOINT", "https://installer.mtae.com.au"
 ).rstrip("/")
-INSTALLER_VERSION = "1.2.4"
+INSTALLER_VERSION = "1.2.5"
 PRODUCT_PACKAGE_SCHEMA = "mtae.van-gogh.product-package.v1"
 
 
@@ -194,14 +200,14 @@ def _validate_product_release_manifest(manifest: dict[str, Any]) -> dict[str, An
         bytes.fromhex(digest)
     except ValueError as error:
         raise InstallError("Product release SHA-256 is invalid") from error
-    module_url = manifest.get("module_url")
-    if module_url is None:
-        module_url = module_url_for_release(str(manifest["version"]))
-    if not isinstance(module_url, str) or re.fullmatch(
-        r"/local/van-gogh2/[0-9A-Za-z][0-9A-Za-z.-]{0,127}/van-gogh2\.js",
-        module_url,
-    ) is None:
-        raise InstallError("Product release frontend module URL is invalid")
+    try:
+        expected_module_url = module_url_for_release(str(manifest["version"]))
+        module_url = manifest.get("module_url", expected_module_url)
+        validate_module_url(module_url)
+    except HAError as error:
+        raise InstallError("Product release frontend module URL is invalid") from error
+    if module_url != expected_module_url:
+        raise InstallError("Product release frontend module URL does not match component identity")
     manifest["module_url"] = module_url
     return manifest
 

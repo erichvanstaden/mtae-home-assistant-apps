@@ -223,7 +223,7 @@ class NeutralOnboardingTests(unittest.TestCase):
                 worker.join(timeout=5)
 
             self.assertTrue(response["installed"])
-            self.assertEqual(captured["installer_version"], "1.2.4")
+            self.assertEqual(captured["installer_version"], "1.2.5")
             self.assertEqual(captured["kwargs"], {"defer_commit": True})
             self.assertEqual(captured["args"][3], "2026.9.1")
             self.assertFalse(any("target" in str(value).lower() for value in captured["kwargs"].values()))

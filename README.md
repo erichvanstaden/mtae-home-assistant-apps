@@ -19,7 +19,7 @@ This repository contains the **MTAE Van Gogh Installer** application shell. It d
 4. Install **MTAE Van Gogh Installer**.
 5. Start the app and open its Web UI.
 6. Enter the one-time MTAE Install Code, then select **Activate site**. Activation uses the approved production bootstrap; there is no Installer profile or dashboard-target selector.
-7. On a clean system, activation creates `/config/van_gogh2-site.json` from the package-owned neutral starter. An existing valid manifest remains authoritative and is preserved byte-for-byte. Select **Check release**, **Install / update**, then **Launch Builder**. This unpublished Installer `1.2.4` candidate accepts private product package `1.0.0-builder.22-deployable.6`, carrying component `2.0.0-builder.3`, Foundation `1.5.0`, and frontend assets `2.0.0-suite.1`.
+7. On a clean system, activation creates `/config/van_gogh2-site.json` from the package-owned neutral starter. An existing valid manifest remains authoritative and is preserved byte-for-byte. Select **Check release**, **Install / update**, then **Launch Builder**. Installer `1.2.5` accepts private product package `1.0.0-builder.22-deployable.8`, carrying component `2.0.0-builder.5`, Foundation `1.5.0`, and frontend assets `2.0.0-suite.1`. It registers the exact cache-safe module URL `/local/van-gogh2/2.0.0-suite.1/van-gogh2.js?v=2.0.0-builder.5`.
 
 ## Ownership boundary
 

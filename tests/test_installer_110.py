@@ -94,6 +94,18 @@ class Installer110ContractTests(unittest.TestCase):
     def test_product_release_manifest_is_accepted(self):
         manifest = self.manifest()
         self.assertIs(app._validate_product_release_manifest(manifest), manifest)
+        self.assertEqual(
+            manifest["module_url"],
+            "/local/van-gogh2/2.0.0-suite.1/van-gogh2.js?v=2.0.0-staging.8",
+        )
+
+    def test_product_release_manifest_rejects_cache_key_mismatch(self):
+        manifest = {
+            **self.manifest(),
+            "module_url": "/local/van-gogh2/2.0.0-suite.1/van-gogh2.js?v=2.0.0-staging.7",
+        }
+        with self.assertRaises(InstallError):
+            app._validate_product_release_manifest(manifest)
 
     def test_release_lookup_preserves_product_package_identity(self):
         manifest = {
@@ -128,7 +140,7 @@ class Installer110ContractTests(unittest.TestCase):
             "readback_verified": True,
         }
 
-        module_url = "/local/van-gogh2/2.0.0-suite.1/van-gogh2.js"
+        module_url = "/local/van-gogh2/2.0.0-suite.1/van-gogh2.js?v=2.0.0-builder.5"
         result = client.finish_setup(module_url)
 
         self.assertEqual(result["integration"], {"required": False, "state": "not_required"})

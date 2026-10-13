@@ -164,7 +164,7 @@ class ProductUpdateTests(unittest.TestCase):
         return hashlib.sha256(self.site_path.read_bytes()).hexdigest()
 
     def manager(self, ha):
-        return ProductUpdateManager(InstallManager(self.config), ha, "1.2.4")
+        return ProductUpdateManager(InstallManager(self.config), ha, "1.2.5")
 
     def apply(self, manager):
         return manager.apply(self.archive, self.release, self.site_path, "2026.9.1")
@@ -331,8 +331,8 @@ class ProductUpdateTests(unittest.TestCase):
 
     def test_package_is_deterministic_site_neutral_and_identity_separated(self):
         package = inspect_package(self.archive, self.release["sha256"])
-        self.assertEqual(package.manifest["package_version"], "1.0.0-builder.22-deployable.6")
-        self.assertEqual(package.manifest["component_version"], "2.0.0-builder.3")
+        self.assertEqual(package.manifest["package_version"], "1.0.0-builder.22-deployable.8")
+        self.assertEqual(package.manifest["component_version"], "2.0.0-builder.5")
         self.assertEqual(package.manifest["foundation"]["version"], "1.5.0")
         self.assertNotEqual(package.manifest["package_version"], package.manifest["component_version"])
         with tarfile.open(self.archive, "r:gz") as package_tar:
@@ -571,7 +571,7 @@ class ProductUpdateTests(unittest.TestCase):
     def test_product_package_matches_frozen_builder22_successor_identity(self):
         self.assertEqual(
             hashlib.sha256(self.archive.read_bytes()).hexdigest(),
-            "ac8f67341f965cf24923f21b55fd069bea210b842bd3ab5d2ff454b2bf40e128",
+            "2a29063b6462f317a26730b9bfff46316bbce649786db02e7cc7221512464cba",
         )
         self.assertEqual(self.release["sha256"], hashlib.sha256(self.archive.read_bytes()).hexdigest())
 

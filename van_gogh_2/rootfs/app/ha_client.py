@@ -19,6 +19,10 @@ from typing import Any, Callable
 
 DOMAIN = "van_gogh2"
 MODULE_URL = "/local/van-gogh2/2.0.0-suite.1/van-gogh2.js"
+MODULE_URL_PATTERN = re.compile(
+    r"^/local/van-gogh2/[0-9A-Za-z][0-9A-Za-z.-]{0,127}/"
+    r"van-gogh2\.js\?v=[0-9A-Za-z][0-9A-Za-z.-]{0,127}$"
+)
 BUILDER_DASHBOARD_PATH = "van-gogh-builder"
 BUILDER_DASHBOARD_TITLE = "Van Gogh Builder"
 
@@ -75,7 +79,14 @@ def module_url_for_release(release_version: str) -> str:
         or not RELEASE_VERSION_PATTERN.fullmatch(release_version)
     ):
         raise HAError("Van Gogh release manifest version is invalid")
-    return f"/local/van-gogh2/{release_version}/van-gogh2.js"
+    return f"{MODULE_URL}?v={release_version}"
+
+
+def validate_module_url(module_url: str) -> str:
+    """Fail closed unless the complete cache-safe frontend URL is narrowly valid."""
+    if not isinstance(module_url, str) or MODULE_URL_PATTERN.fullmatch(module_url) is None:
+        raise HAError("Van Gogh frontend module URL is invalid")
+    return module_url
 
 
 def _is_van_gogh_resource(item: dict[str, Any]) -> bool:
@@ -820,6 +831,7 @@ class HAClient:
         raise HAError("Van Gogh integration entry did not reach loaded state")
 
     def ensure_resource(self, module_url: str = MODULE_URL) -> dict[str, Any]:
+        validate_module_url(module_url)
         with self.websocket() as connection:
             resources = connection.call({"type": "lovelace/resources"})
             if not isinstance(resources, list):
@@ -843,6 +855,7 @@ class HAClient:
         timeout: float = 60.0,
         poll_interval: float = 2.0,
     ) -> dict[str, Any]:
+        validate_module_url(module_url)
         request = urllib.request.Request(f"{self.core_asset_origin()}{module_url}")
         direct_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         wait_seconds = max(0.0, min(timeout, 60.0))
@@ -876,11 +889,7 @@ class HAClient:
             time.sleep(min(poll_interval, deadline - now))
 
     def finish_setup(self, module_url: str) -> dict[str, Any]:
-        if not isinstance(module_url, str) or re.fullmatch(
-            r"/local/van-gogh2/[0-9A-Za-z][0-9A-Za-z.-]{0,127}/van-gogh2\.js",
-            module_url,
-        ) is None:
-            raise HAError("Van Gogh frontend module URL is invalid")
+        validate_module_url(module_url)
         config = self.wait_ready()
         entry = {"required": False, "state": "not_required"}
         # Classify the single owned route before touching any other HA surface so

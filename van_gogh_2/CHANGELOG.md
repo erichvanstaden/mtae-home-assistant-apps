@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.5
+
+- Register, verify and read back the exact component-versioned Van Gogh frontend resource so retained browsers fetch the installed Builder module graph.
+- Reject malformed, traversal-bearing or component-mismatched frontend URLs before any Home Assistant resource write.
+- Ship Builder.22 package `1.0.0-builder.22-deployable.8` (component `2.0.0-builder.5`) while preserving the accepted responsive `builder-card.js` bytes.
+
 ## 1.2.4
 
 - Remove Installer dashboard-profile and target selection controls; activation is a neutral production bootstrap.
