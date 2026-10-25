@@ -4,8 +4,8 @@ FROM $BUILD_FROM
 WORKDIR /app
 COPY rootfs/app/ /app/
 COPY run.sh /run.sh
-RUN python3 -m pip install --no-cache-dir --break-system-packages \
-        "jsonschema==4.25.1" "PyYAML==6.0.2" \
+RUN python3 -m pip install --no-cache-dir --break-system-packages --only-binary=:all: \
+        "jsonschema==4.25.1" "PyYAML==6.0.3" \
     && chmod 0755 /run.sh \
     && python3 -m compileall -q /app
 

@@ -94,6 +94,18 @@ def _is_van_gogh_resource(item: dict[str, Any]) -> bool:
     return url.startswith(("/van-gogh2-assets/", "/local/van-gogh2/")) and url.endswith("/van-gogh2.js")
 
 
+def _is_installer_resource(item: dict[str, Any]) -> bool:
+    """Return whether a row is the retired Installer-owned local module loader."""
+    url = str(item.get("url", "")).split("?", 1)[0]
+    return url.startswith("/local/van-gogh2/") and url.endswith("/van-gogh2.js")
+
+
+def _is_integration_resource(item: dict[str, Any]) -> bool:
+    """Return whether a row is owned by the integration's asset transport."""
+    url = str(item.get("url", "")).split("?", 1)[0]
+    return url.startswith("/van-gogh2-assets/") and url.endswith("/van-gogh2.js")
+
+
 def _resource_type(item: dict[str, Any]) -> Any:
     """Normalise HA's response key (`type`) and command key (`res_type`)."""
     return item.get("res_type") or item.get("type")
@@ -849,6 +861,39 @@ class HAClient:
             raise HAError("Van Gogh Lovelace resource did not reconcile to exactly one module")
         return {"resource_id": exact[0].get("id"), "url": module_url, "count": 1}
 
+    def retire_installer_resources(self) -> dict[str, Any]:
+        """Remove only the obsolete local loader after integration activation."""
+        with self.websocket() as connection:
+            resources = connection.call({"type": "lovelace/resources"})
+            if not isinstance(resources, list):
+                raise HAError("Home Assistant returned an invalid resource list")
+            retired = [item for item in resources if _is_installer_resource(item)]
+            resource_ids = [item.get("id") for item in retired]
+            if any(not isinstance(resource_id, str) or not resource_id for resource_id in resource_ids):
+                raise HAError("Installer-owned Lovelace resource has no rollback identifier")
+            for resource_id in resource_ids:
+                connection.call(
+                    {
+                        "type": "lovelace/resources/delete",
+                        "resource_id": resource_id,
+                    }
+                )
+            result = connection.call({"type": "lovelace/resources"})
+        if not isinstance(result, list):
+            raise HAError("Home Assistant returned an invalid resource readback")
+        remaining = [item for item in result if _is_installer_resource(item)]
+        if remaining:
+            raise HAError("Installer-owned Lovelace resource retirement readback failed")
+        integration = [item for item in result if _is_integration_resource(item)]
+        return {
+            "removed_resource_ids": resource_ids,
+            "removed_count": len(resource_ids),
+            "remaining_installer_resource_count": 0,
+            "integration_resource_count": len(integration),
+            "transport": "integration",
+            "readback_verified": True,
+        }
+
     def probe_module(
         self,
         module_url: str = MODULE_URL,
@@ -891,11 +936,13 @@ class HAClient:
     def finish_setup(self, module_url: str) -> dict[str, Any]:
         validate_module_url(module_url)
         config = self.wait_ready()
-        entry = {"required": False, "state": "not_required"}
         # Classify the single owned route before touching any other HA surface so
         # an unknown/owner-edited collision fails closed with zero writes.
         builder_dashboard = self.ensure_builder_dashboard()
-        resource = self.ensure_resource(module_url)
+        entry = self.ensure_config_entry()
+        # Current integrations own the browser loader. Establish that transport
+        # first, then retire only the obsolete Installer resource.
+        resource = self.retire_installer_resources()
         module = self.probe_module(module_url)
         return {
             "core_version": config.get("version"),
@@ -905,11 +952,22 @@ class HAClient:
             "builder_dashboard": builder_dashboard,
         }
 
-    def restore_resources(self, snapshot: list[dict[str, Any]]) -> dict[str, Any]:
+    def restore_resources(
+        self,
+        snapshot: list[dict[str, Any]],
+        *,
+        retire_installer_resources: bool = False,
+    ) -> dict[str, Any]:
+        expected_snapshot = [
+            item
+            for item in snapshot
+            if not (retire_installer_resources and _is_installer_resource(item))
+        ]
+        retired_installer_resource_count = len(snapshot) - len(expected_snapshot)
         with self.websocket() as connection:
             current = connection.call({"type": "lovelace/resources"})
             for action in restore_resource_plan(
-                current if isinstance(current, list) else [], snapshot
+                current if isinstance(current, list) else [], expected_snapshot
             ):
                 kind = action.pop("action")
                 if kind == "delete":
@@ -919,18 +977,24 @@ class HAClient:
             result = connection.call({"type": "lovelace/resources"})
         owned = [item for item in result if _is_van_gogh_resource(item)]
         if [(item.get("url"), _resource_type(item)) for item in owned] != [
-            (item.get("url"), _resource_type(item)) for item in snapshot
+            (item.get("url"), _resource_type(item)) for item in expected_snapshot
         ]:
             raise HAError("Van Gogh resource rollback readback did not match prestate")
-        expected_ids = {str(item.get("id")) for item in snapshot if item.get("id")}
+        expected_ids = {str(item.get("id")) for item in expected_snapshot if item.get("id")}
         actual_ids = {str(item.get("id")) for item in owned if item.get("id")}
         return {
             "resource_count": len(owned),
             "resource_ids_preserved": expected_ids.issubset(actual_ids),
+            "retired_installer_resource_count": retired_installer_resource_count,
             "readback_verified": True,
         }
 
-    def restore_prestate(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+    def restore_prestate(
+        self,
+        snapshot: dict[str, Any],
+        *,
+        retire_installer_resources: bool = False,
+    ) -> dict[str, Any]:
         """Restore Van Gogh-owned registry/resource state and verify the readback."""
         expected_entries = snapshot.get("entries", []) if isinstance(snapshot, dict) else []
         expected_resources = snapshot.get("resources", []) if isinstance(snapshot, dict) else []
@@ -947,7 +1011,10 @@ class HAClient:
         actual_ids = sorted(str(item.get("entry_id")) for item in self.entries() if item.get("domain") == DOMAIN)
         if actual_ids != expected_ids:
             raise HAError("Van Gogh config entry rollback readback did not match prestate")
-        resources = self.restore_resources(expected_resources)
+        resources = self.restore_resources(
+            expected_resources,
+            retire_installer_resources=retire_installer_resources,
+        )
         builder_snapshot = snapshot.get("builder_dashboard")
         builder_dashboard = (
             self.restore_dashboard(builder_snapshot)

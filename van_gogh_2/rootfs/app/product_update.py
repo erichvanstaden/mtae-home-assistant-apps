@@ -245,14 +245,48 @@ def _normalise_dashboard_targets(value: Any, fallback: str) -> list[str]:
     return [target for target in SUPPORTED_DASHBOARD_TARGETS if target in requested]
 
 
-def _site_for_dashboard_target(site: dict[str, Any], profile: str) -> dict[str, Any]:
+def _site_for_dashboard_target(
+    site: dict[str, Any],
+    profile: str,
+    inventory: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     target = deepcopy(site)
     site_id = str(target["site"]["id"])
+    profile_id = "mobile-app" if profile == "mobile/app" else "wall-10"
+    matching_paths: list[str] = []
+    for row in inventory or []:
+        registry = row.get("registry") if isinstance(row, dict) else None
+        config = row.get("config") if isinstance(row, dict) else None
+        marker = config.get("mtae_profile") if isinstance(config, dict) else None
+        if not isinstance(registry, dict) or not isinstance(marker, dict):
+            continue
+        if marker.get("id") != profile_id:
+            continue
+        path = registry.get("url_path")
+        if not isinstance(path, str) or not PATH.fullmatch(path):
+            raise ProductUpdateError(
+                f"Installed {profile} dashboard has an invalid storage path"
+            )
+        matching_paths.append(path)
+    if len(matching_paths) > 1:
+        raise ProductUpdateError(
+            f"Multiple installed dashboards claim the {profile} profile"
+        )
+    panel_id = matching_paths[0] if matching_paths else (
+        f"{site_id}-mobile" if profile == "mobile/app" else f"{site_id}-wall10"
+    )
+    if matching_paths:
+        site_id = (
+            panel_id.removesuffix("-mobile")
+            if profile == "mobile/app" and panel_id.endswith("-mobile")
+            else panel_id
+        )
+        target["site"] = {**target["site"], "id": site_id}
     if profile == "mobile/app":
         target["site"]["title"] = f'{target["site"]["title"]} Mobile'
     target["panel"] = {
         **target["panel"],
-        "id": f"{site_id}-mobile" if profile == "mobile/app" else f"{site_id}-wall10",
+        "id": panel_id,
         "type": "phone" if profile == "mobile/app" else "wall",
         "profile": profile,
         "display_mode": "companion-app" if profile == "mobile/app" else "ha-shell",
@@ -276,6 +310,7 @@ def _enabled_features(site: dict[str, Any], package: ProductPackage) -> list[str
 def _schema_marker(package: ProductPackage, site: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema_version": PRODUCT_SCHEMA_VERSION,
+        "background_contract_version": 1,
         "package_version": package.manifest["package_version"],
         "component_version": package.manifest["component_version"],
         "foundation_version": package.manifest["foundation"]["version"],
@@ -284,6 +319,86 @@ def _schema_marker(package: ProductPackage, site: dict[str, Any]) -> dict[str, A
         "feature_catalogue_version": package.catalogue["catalogue_version"],
         "enabled_features": _enabled_features(site, package),
     }
+
+
+def _dashboard_route_replacements(
+    package: ProductPackage, site: dict[str, Any], generated_paths: set[str]
+) -> set[str]:
+    declared = package.manifest.get("dashboard_route_replacements", {})
+    if not isinstance(declared, dict):
+        raise ProductUpdateError("Product-package dashboard route replacements are invalid")
+    profile = site.get("panel", {}).get("profile")
+    requested = declared.get(profile, [])
+    if not isinstance(requested, list) or any(
+        not isinstance(path, str) or not PATH.fullmatch(path) for path in requested
+    ):
+        raise ProductUpdateError("Product-package dashboard route replacements are invalid")
+    replacements = set(requested)
+    if len(replacements) != len(requested):
+        raise ProductUpdateError("Product-package dashboard route replacements are ambiguous")
+    missing = replacements - generated_paths
+    if missing:
+        raise ProductUpdateError(
+            "Product-package replacement route is missing from generated dashboard: "
+            + ", ".join(sorted(missing))
+        )
+    return replacements
+
+
+def _materialise_media_bindings(
+    dashboard: dict[str, Any], site: dict[str, Any]
+) -> dict[str, Any]:
+    """Bind approved Media wrappers to the target site's declared players."""
+    result = deepcopy(dashboard)
+    room_names = {
+        str(room.get("id")): str(room.get("name"))
+        for room in site.get("rooms", [])
+        if isinstance(room, dict) and room.get("id") and room.get("name")
+    }
+    grouped: dict[str, dict[str, Any]] = {}
+    bindings = site.get("bindings", {})
+    for reference in site.get("content", {}).get("media", []):
+        binding = bindings.get(reference, {}) if isinstance(bindings, dict) else {}
+        entity_id = binding.get("entity_id") if isinstance(binding, dict) else None
+        if not isinstance(entity_id, str) or not entity_id.startswith("media_player."):
+            continue
+        room_id = str(binding.get("room") or "media")
+        room = grouped.setdefault(
+            room_id,
+            {
+                "id": room_id,
+                "name": room_names.get(room_id, room_id.replace("_", " ").title()),
+                "icon": "mdi:speaker",
+                "entities": [],
+            },
+        )
+        if entity_id not in room["entities"]:
+            room["entities"].append(entity_id)
+    media_rooms = list(grouped.values())
+    if site.get("features", {}).get("media") is True and not media_rooms:
+        raise ProductUpdateError("Enabled Media feature has no media_player binding")
+
+    def apply(value: Any) -> None:
+        if isinstance(value, dict):
+            card_type = value.get("type")
+            is_wall = (
+                card_type == "custom:van-gogh2-feature-page-card"
+                and value.get("page") == "media"
+            )
+            is_mobile = (
+                card_type == "custom:mtae-mobile-dashboard-card"
+                and value.get("initial_page") == "media"
+            )
+            if is_wall or is_mobile:
+                value["media_rooms"] = deepcopy(media_rooms)
+            for child in value.values():
+                apply(child)
+        elif isinstance(value, list):
+            for child in value:
+                apply(child)
+
+    apply(result)
+    return result
 
 
 def build_foundation_release(
@@ -366,7 +481,13 @@ def build_foundation_release(
         raise ProductUpdateError(f"Builder.22 neutral {profile} starter failed its profile contract")
 
     site_id = str(site["site"]["id"])
+    dashboard_path = str(site["panel"]["id"])
     site_title = str(site["site"]["title"])
+    source_dashboard_path = str(
+        dashboard.get("mtae_profile", {}).get("dashboard_path")
+        or dashboard.get("url_path")
+        or "van-gogh"
+    )
     replacements = {
         "neutral-target": site_id,
         "van-gogh": site_id,
@@ -376,12 +497,18 @@ def build_foundation_release(
 
     def replace_starter_identity(value: Any) -> Any:
         if isinstance(value, str):
+            if value == source_dashboard_path:
+                return dashboard_path
+            if value == f"/{source_dashboard_path}":
+                return f"/{dashboard_path}"
+            if value.startswith(f"/{source_dashboard_path}/"):
+                return f"/{dashboard_path}/{value.removeprefix(f'/{source_dashboard_path}/')}"
             if value in replacements:
                 return replacements[value]
             if value == "/van-gogh":
-                return f"/{site_id}"
+                return f"/{dashboard_path}"
             if value.startswith("/van-gogh/"):
-                return f"/{site_id}/{value.removeprefix('/van-gogh/')}"
+                return f"/{dashboard_path}/{value.removeprefix('/van-gogh/')}"
             return value
         if isinstance(value, list):
             return [replace_starter_identity(item) for item in value]
@@ -389,7 +516,9 @@ def build_foundation_release(
             return {key: replace_starter_identity(item) for key, item in value.items()}
         return value
 
-    dashboard = replace_starter_identity(dashboard)
+    dashboard = _materialise_media_bindings(
+        replace_starter_identity(dashboard), site
+    )
     (release_root / "dashboard.json").write_text(
         json.dumps(dashboard, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -433,6 +562,150 @@ def _managed_foundation_view(view: Any) -> bool:
     return isinstance(view, dict) and MANAGED_FOUNDATION in view
 
 
+def _navigation_cards(value: Any) -> list[dict[str, Any]]:
+    cards: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        if value.get("type") == "custom:van-gogh2-navigation-card":
+            cards.append(value)
+        for child in value.values():
+            cards.extend(_navigation_cards(child))
+    elif isinstance(value, list):
+        for child in value:
+            cards.extend(_navigation_cards(child))
+    return cards
+
+
+def _materialise_wall_media_navigation(
+    dashboard: dict[str, Any], generated: dict[str, Any]
+) -> None:
+    canonical_by_path: dict[str, dict[str, Any]] = {}
+    for view in generated.get("views", []):
+        if not isinstance(view, dict) or not isinstance(view.get("path"), str):
+            raise ProductUpdateError("Canonical Wall dashboard contains an invalid view")
+        cards = _navigation_cards(view)
+        if len(cards) != 1:
+            raise ProductUpdateError(
+                f"Canonical Wall view {view['path']} must contain exactly one Navigation card"
+            )
+        canonical_by_path[view["path"]] = cards[0]
+
+    canonical_route_sets: list[list[dict[str, Any]]] = []
+    for card in canonical_by_path.values():
+        routes = card.get("routes")
+        if not isinstance(routes, list):
+            raise ProductUpdateError("Canonical Wall navigation card has no route array")
+        if not routes or any(not isinstance(route, dict) for route in routes):
+            raise ProductUpdateError("Canonical Wall navigation route array is invalid")
+        route_ids = [route.get("id") for route in routes]
+        if len(route_ids) != len(set(route_ids)) or route_ids.count("media") != 1:
+            raise ProductUpdateError(
+                "Canonical Wall navigation must contain unique routes and exactly one Media route"
+            )
+        canonical_route_sets.append(routes)
+    if not canonical_route_sets or any(
+        routes != canonical_route_sets[0] for routes in canonical_route_sets[1:]
+    ):
+        raise ProductUpdateError("Canonical Wall navigation routes are missing or inconsistent")
+
+    canonical = canonical_route_sets[0]
+    canonical_route_by_view_path: dict[str, dict[str, Any]] = {}
+    for route in canonical:
+        route_path = route.get("path")
+        if not isinstance(route_path, str) or not route_path.startswith("/"):
+            raise ProductUpdateError("Canonical Wall navigation contains an invalid route path")
+        view_path = route_path.rstrip("/").rsplit("/", 1)[-1]
+        if not PATH.fullmatch(view_path) or view_path in canonical_route_by_view_path:
+            raise ProductUpdateError("Canonical Wall navigation route paths are ambiguous")
+        canonical_route_by_view_path[view_path] = route
+    if set(canonical_route_by_view_path) != set(canonical_by_path):
+        raise ProductUpdateError(
+            "Canonical Wall navigation route membership does not match its page catalogue"
+        )
+
+    installed_routes: list[dict[str, Any]] = []
+    installed_paths: set[str] = set()
+    for view in dashboard.get("views", []):
+        if not isinstance(view, dict) or not isinstance(view.get("path"), str):
+            raise ProductUpdateError("Installed Wall dashboard contains an invalid view")
+        path = view["path"]
+        route = canonical_route_by_view_path.get(path)
+        if route is None:
+            raise ProductUpdateError(
+                f"Installed Wall view {path} has no canonical Navigation route"
+            )
+        if path in installed_paths:
+            raise ProductUpdateError(
+                f"Installed Wall page catalogue contains duplicate route {path}"
+            )
+        installed_paths.add(path)
+        installed_routes.append(deepcopy(route))
+
+    for view in dashboard.get("views", []):
+        path = view["path"]
+        source = canonical_by_path[path]
+        cards = _navigation_cards(view)
+        if len(cards) != 1:
+            raise ProductUpdateError(
+                f"Installed Wall view {path} must contain exactly one Navigation card"
+            )
+        cards[0]["routes"] = deepcopy(installed_routes)
+        cards[0]["selected"] = source.get("selected")
+        if "builder_dynamic" in source:
+            cards[0]["builder_dynamic"] = source["builder_dynamic"]
+
+
+def _legacy_mobile_profile_dashboard(
+    row: dict[str, Any], site: dict[str, Any], target_path: str
+) -> dict[str, Any] | None:
+    """Recognise the accepted pre-product-marker Mobile profile fail closed.
+
+    Older accepted Mobile dashboards carry the profile/site identity but not the
+    newer product ownership marker.  That identity is sufficient only for the
+    explicitly declared route-replacement upgrade; an arbitrary dashboard at
+    the same URL remains protected.
+    """
+    if site.get("panel", {}).get("profile") != "mobile/app":
+        return None
+    config = row.get("config") if isinstance(row, dict) else None
+    if not isinstance(config, dict):
+        return None
+    profile = config.get("mtae_profile")
+    if not isinstance(profile, dict) or profile.get("id") != "mobile-app":
+        return None
+    identity = profile.get("site_manifest_identity")
+    if not isinstance(identity, str) or not identity.endswith(f":{target_path}"):
+        return None
+    views = config.get("views")
+    if not isinstance(views, list):
+        return None
+    by_path: dict[str, list[dict[str, Any]]] = {}
+    for view in views:
+        if not isinstance(view, dict) or not isinstance(view.get("path"), str):
+            continue
+        by_path.setdefault(view["path"], []).append(view)
+    if len(by_path.get("home", [])) != 1 or len(by_path.get("media", [])) != 1:
+        return None
+    if any(
+        view.get("type") != "custom:van-gogh-mobile-home-view"
+        for path in ("home", "media")
+        for view in by_path[path]
+    ):
+        return None
+
+    def contains_mobile_navigation(value: Any) -> bool:
+        if isinstance(value, dict):
+            return value.get("type") == "custom:van-gogh-mobile-navigation-card" or any(
+                contains_mobile_navigation(child) for child in value.values()
+            )
+        if isinstance(value, list):
+            return any(contains_mobile_navigation(child) for child in value)
+        return False
+
+    if not contains_mobile_navigation(config):
+        return None
+    return config
+
+
 def _compose_dashboard(
     generated: dict[str, Any],
     base: dict[str, Any] | None,
@@ -452,6 +725,15 @@ def _compose_dashboard(
         result["views"] = foundation_views
     else:
         result = deepcopy(base)
+        base_product_marker = base.get(PRODUCT_MARKER)
+        if (
+            "background" not in base
+            and isinstance(base_product_marker, dict)
+            and base_product_marker.get("component_version") == "2.0.0-suite.2-owner-corrections.44"
+            and base_product_marker.get("background_contract_version") != 1
+            and isinstance(generated.get("background"), dict)
+        ):
+            result["background"] = deepcopy(generated["background"])
         views = result.get("views")
         if not isinstance(views, list):
             raise ProductUpdateError("Installed dashboard config has no view array")
@@ -460,11 +742,18 @@ def _compose_dashboard(
             for view in foundation_views
             if isinstance(view.get("path"), str) and view.get("path")
         }
+        replacement_paths = _dashboard_route_replacements(
+            package, site, set(generated_by_path)
+        )
         consumed_paths: set[str] = set()
         preserved_paths: set[str] = set()
         composed: list[Any] = []
         for existing in views:
             path = str(existing.get("path") or "") if isinstance(existing, dict) else ""
+            if path in replacement_paths:
+                composed.append(generated_by_path[path])
+                consumed_paths.add(path)
+                continue
             if _managed_foundation_view(existing):
                 replacement = generated_by_path.get(path)
                 if replacement is not None:
@@ -481,6 +770,8 @@ def _compose_dashboard(
             if str(view.get("path") or "") not in consumed_paths | preserved_paths
         )
         result["views"] = composed
+        if site["panel"]["profile"] == "wall-10" and "media" in replacement_paths:
+            _materialise_wall_media_navigation(result, generated)
     for key in ("mtae_profile", "wallpanel"):
         if key in generated:
             result[key] = deepcopy(generated[key])
@@ -533,6 +824,33 @@ def plan_update(
     except MigrationError as error:
         if str(error) != "No supported Installer-managed Van Gogh dashboard was discovered":
             raise ProductUpdateError(str(error)) from error
+        if len(target_rows) == 1:
+            row = target_rows[0]
+            registry = row.get("registry") if isinstance(row, dict) else None
+            before = _legacy_mobile_profile_dashboard(row, site, target_path)
+            if isinstance(registry, dict) and before is not None:
+                generated_paths = {
+                    str(view.get("path"))
+                    for view in generated.get("views", [])
+                    if isinstance(view, dict) and isinstance(view.get("path"), str)
+                }
+                if not _dashboard_route_replacements(package, site, generated_paths):
+                    raise ProductUpdateError(
+                        "Legacy Mobile profile upgrade needs an explicit replacement route"
+                    )
+                after = _compose_dashboard(generated, before, package, site)
+                return ProductPlan(
+                    "legacy_profile_upgrade",
+                    target_path,
+                    str(
+                        registry.get("title")
+                        or generated.get("title")
+                        or site["site"]["title"]
+                    ),
+                    deepcopy(before),
+                    after,
+                    after != before,
+                )
         productish = []
         for row in target_rows:
             config = row.get("config") if isinstance(row, dict) else None
@@ -857,6 +1175,29 @@ class ProductUpdateManager:
         defer_commit: bool = False,
     ) -> dict[str, Any]:
         """Install runtime/Foundation files while Builder owns all user dashboards."""
+        package = inspect_package(archive, str(release.get("sha256") or ""))
+        route_replacements = package.manifest.get("dashboard_route_replacements", {})
+        if not isinstance(route_replacements, dict):
+            raise ProductUpdateError(
+                "Product-package dashboard route replacements are invalid"
+            )
+        requested_profiles = [
+            profile
+            for profile in SUPPORTED_DASHBOARD_TARGETS
+            if route_replacements.get(profile)
+        ]
+        if requested_profiles:
+            # Builder retains dashboard structure. Explicit package route
+            # replacements are the bounded exception: the normal transaction
+            # preserves every other route and captures exact prestates.
+            return self.apply(
+                archive,
+                release,
+                site_manifest_path,
+                home_assistant_version,
+                dashboard_targets=requested_profiles,
+                defer_commit=defer_commit,
+            )
         return self.apply(
             archive,
             release,
@@ -895,11 +1236,12 @@ class ProductUpdateManager:
             raise ProductUpdateError("Local site manifest cannot be read as JSON") from error
         site = validate_site_manifest(site_raw, package)
         targets = _normalise_dashboard_targets(dashboard_targets, str(site["panel"]["profile"]))
+        inventory = [] if builder_owned else self.ha.storage_dashboard_inventory()
         with tempfile.TemporaryDirectory(prefix="van-gogh-product-update-") as temporary:
             workspace = Path(temporary)
             generated_targets: list[tuple[str, dict[str, Any], Path, dict[str, Any]]] = []
             for index, target in enumerate(targets):
-                target_site = _site_for_dashboard_target(site, target)
+                target_site = _site_for_dashboard_target(site, target, inventory)
                 target_manifest = workspace / f"site-{index}.json"
                 target_manifest.write_text(
                     json.dumps(target_site, indent=2, sort_keys=True) + "\n",
@@ -913,7 +1255,6 @@ class ProductUpdateManager:
                 generated_targets.append((target, target_site, release_root, generated))
             plans = []
             if not builder_owned:
-                inventory = self.ha.storage_dashboard_inventory()
                 plans = [
                     plan_update(package, target_site, inventory, generated)
                     for _target, target_site, _release_root, generated in generated_targets

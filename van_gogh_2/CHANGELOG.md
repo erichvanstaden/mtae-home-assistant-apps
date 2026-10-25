@@ -1,5 +1,41 @@
 # Changelog
 
+## 1.2.11
+
+- Make the Lovelace dashboard-level `background` the sole canonical Wall-10 background authority and preserve it through native editing and Builder Media remove/re-add operations.
+- Render that authority behind every installed Wall-10 page without changing accepted view geometry, navigation, bindings, or Fixes 1–2.
+- Qualify private Product `2.0.0-suite.2-owner-corrections.45` from exact Product `.44` while retaining exact Product `.40` as rollback; deployment remains restricted to the authorised disposable owner checkpoint.
+
+## 1.2.10
+
+- Preserve the selected installed Lovelace registry `url_path` through Product planning, apply, and rollback rather than routing the generated Wall dashboard through the package starter path.
+- Reconcile every managed Wall-10 route to the package-owned shared Navigation route set, including one protected-frame Media Navigation card, while preserving non-route view content and the Mobile profile.
+- Qualify private Product `2.0.0-suite.2-owner-corrections.44` with Product `.40` retained as the exact Product rollback; no publication or broad rollout is included.
+
+## 1.2.9
+
+- Require binary wheels for Installer Python dependencies and update PyYAML to `6.0.3`, whose CPython 3.14 musllinux aarch64 wheel avoids target-local compilation on low-resource ARM systems.
+- Preserve Installer `1.2.8` application behaviour and the byte-exact private Product `2.0.0-suite.2-owner-corrections.38`; no Product, visual, interaction, binding or dispatch semantics change.
+
+## 1.2.8
+
+- Materialise the package-owned Media route through the actual Wall and Mobile production-wrapper paths while preserving every non-Media route from accepted `.35`.
+- Carry the accepted Music and TV M1-M4 component contract, 19-field owner appearance contract, navigation zero-dispatch, and unavailable fail-closed zero-dispatch in private product package `2.0.0-suite.2-owner-corrections.38`.
+- Retain the exact `.35` protected rollback, transactional failed-install recovery, and zero-equipment-actuation boundary; no live deployment is included in this candidate.
+
+## 1.2.7
+
+- Use the loaded `van_gogh2` integration as the sole frontend module-graph owner and retire the obsolete distinct `/local/van-gogh2/.../van-gogh2.js` Lovelace loader after integration activation.
+- Prevent duplicate custom-element registration and the resulting scoped-registry `/unknown/node_modules/...` source-map cascade while preserving exact product release bytes.
+- Keep automatic failed-install restoration exact; explicit product rollback deliberately does not restore the retired Installer-owned loader, so the restored product still has one frontend transport.
+- Clean-install verify the byte-identical private product package `2.0.0-suite.2-owner-corrections.11` while preserving owner dashboards, unrelated resources, site bindings and the zero-equipment-actuation boundary.
+
+## 1.2.6
+
+- Create and verify exactly one loaded `van_gogh2` config entry during Installer readiness so the backend WebSocket and artwork routes are active after a clean install.
+- Treat config-entry creation as rollback-managed Home Assistant state during an exact-current reinstall.
+- Preserve the byte-identical private product package `2.0.0-suite.2-owner-corrections.10`, unrelated Installer behaviour, owner dashboards and zero-actuation boundary.
+
 ## 1.2.5
 
 - Register, verify and read back the exact component-versioned Van Gogh frontend resource so retained browsers fetch the installed Builder module graph.

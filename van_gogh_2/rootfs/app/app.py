@@ -32,7 +32,7 @@ OPERATION_LOCK = threading.Lock()
 DEFAULT_RELEASE_ENDPOINT = os.environ.get(
     "VAN_GOGH_RELEASE_ENDPOINT", "https://installer.mtae.com.au"
 ).rstrip("/")
-INSTALLER_VERSION = "1.2.5"
+INSTALLER_VERSION = "1.2.11"
 PRODUCT_PACKAGE_SCHEMA = "mtae.van-gogh.product-package.v1"
 
 
@@ -461,10 +461,14 @@ class Handler(BaseHTTPRequestHandler):
                             readiness["restart_cycle"] = _no_restart_cycle()
                             product_result["readiness"] = readiness
                             builder_result = readiness.get("builder_dashboard") or {}
-                            ha_changed = bool(builder_result.get("dashboard_writes"))
+                            integration_result = readiness.get("integration") or {}
+                            ha_changed = bool(
+                                builder_result.get("dashboard_writes")
+                                or integration_result.get("created")
+                            )
                             if ha_changed and not manager.current_receipt.is_file():
                                 raise InstallError(
-                                    "Builder entry changed but no rollback receipt is available"
+                                    "Home Assistant readiness changed but no rollback receipt is available"
                                 )
                             if manager.current_receipt.is_file():
                                 annotation = {
@@ -537,7 +541,10 @@ class Handler(BaseHTTPRequestHandler):
                                 progress=lambda stage: _operation_update(operation_id, stage)
                             )
                             _operation_update(operation_id, "restoring_home_assistant")
-                            receipt["home_assistant"] = ha.restore_prestate(prestate)
+                            receipt["home_assistant"] = ha.restore_prestate(
+                                prestate,
+                                retire_installer_resources=True,
+                            )
                             receipt["restart_cycle"] = restart_cycle
                             receipt["restart_required"] = False
                         except HARestartPending:
