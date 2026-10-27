@@ -13,6 +13,7 @@ from product_update import (  # noqa: E402
     ProductUpdateError,
     _compose_dashboard,
     _materialise_media_bindings,
+    _site_for_dashboard_target,
     plan_update,
 )
 
@@ -36,6 +37,68 @@ def package() -> ProductPackage:
 
 
 class MediaRouteReplacementTest(unittest.TestCase):
+    def test_wall_upgrade_keeps_profile_route_identity_separate_from_storage_path(self) -> None:
+        site = {
+            "schema_version": 1,
+            "site": {"id": "neutral-target", "title": "Accepted site"},
+            "panel": {"id": "neutral-target-wall10", "profile": "wall-10"},
+        }
+        inventory = [
+            {
+                "registry": {"url_path": "installed-storage"},
+                "config": {
+                    "mtae_profile": {
+                        "id": "wall-10",
+                        "dashboard_path": "accepted-wall-routes",
+                    }
+                },
+            }
+        ]
+
+        target = _site_for_dashboard_target(site, "wall-10", inventory)
+
+        self.assertEqual(target["site"]["id"], "installed-storage")
+        self.assertEqual(target["panel"]["id"], "accepted-wall-routes")
+
+    def test_installed_profile_route_identity_must_be_a_safe_path(self) -> None:
+        site = {
+            "schema_version": 1,
+            "site": {"id": "neutral-target", "title": "Accepted site"},
+            "panel": {"id": "neutral-target-wall10", "profile": "wall-10"},
+        }
+        inventory = [
+            {
+                "registry": {"url_path": "installed-storage"},
+                "config": {
+                    "mtae_profile": {
+                        "id": "wall-10",
+                        "dashboard_path": "../unsafe",
+                    }
+                },
+            }
+        ]
+
+        with self.assertRaisesRegex(ProductUpdateError, "invalid profile path"):
+            _site_for_dashboard_target(site, "wall-10", inventory)
+
+    def test_legacy_profile_without_route_identity_keeps_storage_path_fallback(self) -> None:
+        site = {
+            "schema_version": 1,
+            "site": {"id": "neutral-target", "title": "Accepted site"},
+            "panel": {"id": "neutral-target-wall10", "profile": "wall-10"},
+        }
+        inventory = [
+            {
+                "registry": {"url_path": "legacy-storage"},
+                "config": {"mtae_profile": {"id": "wall-10"}},
+            }
+        ]
+
+        target = _site_for_dashboard_target(site, "wall-10", inventory)
+
+        self.assertEqual(target["site"]["id"], "legacy-storage")
+        self.assertEqual(target["panel"]["id"], "legacy-storage")
+
     def test_wall_upgrade_reconciles_one_shared_navigation_per_route(self) -> None:
         existing_home = {
             "title": "Existing home",

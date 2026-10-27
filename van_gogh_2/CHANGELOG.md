@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.2.13
+
+- Preserve every existing owner-edited managed Foundation view exactly when its route remains present during an in-place Product upgrade, including native edit markers and nested card configuration.
+- Keep explicit package-declared route replacement and removal of disabled optional managed routes fail closed without regenerating unrelated installed views.
+- Qualify private Product `2.0.0-suite.2-owner-corrections.65` from exact Product `.59` while retaining exact Product `.59` as rollback; no automatic customer update or equipment actuation is included.
+
+## 1.2.12
+
+- Keep the accepted Builder profile route identity separate from the Lovelace storage registry path during an in-place Product upgrade, preserving exact managed routes and card configuration without recreating the dashboard.
+- Reject malformed installed profile-path markers while retaining the existing fail-closed dashboard ownership checks and exact registry-path rollback.
+- Qualify private Product `2.0.0-suite.2-owner-corrections.61` from exact Product `.59` while retaining exact Product `.59` as rollback; no publication, deployment or live-system action is included.
+
 ## 1.2.11
 
 - Make the Lovelace dashboard-level `background` the sole canonical Wall-10 background authority and preserve it through native editing and Builder Media remove/re-add operations.

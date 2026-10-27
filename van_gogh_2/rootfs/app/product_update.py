@@ -253,7 +253,7 @@ def _site_for_dashboard_target(
     target = deepcopy(site)
     site_id = str(target["site"]["id"])
     profile_id = "mobile-app" if profile == "mobile/app" else "wall-10"
-    matching_paths: list[str] = []
+    matching_targets: list[tuple[str, str | None]] = []
     for row in inventory or []:
         registry = row.get("registry") if isinstance(row, dict) else None
         config = row.get("config") if isinstance(row, dict) else None
@@ -267,21 +267,31 @@ def _site_for_dashboard_target(
             raise ProductUpdateError(
                 f"Installed {profile} dashboard has an invalid storage path"
             )
-        matching_paths.append(path)
-    if len(matching_paths) > 1:
+        profile_path = marker.get("dashboard_path")
+        if profile_path is not None and (
+            not isinstance(profile_path, str) or not PATH.fullmatch(profile_path)
+        ):
+            raise ProductUpdateError(
+                f"Installed {profile} dashboard has an invalid profile path"
+            )
+        matching_targets.append((path, profile_path))
+    if len(matching_targets) > 1:
         raise ProductUpdateError(
             f"Multiple installed dashboards claim the {profile} profile"
         )
-    panel_id = matching_paths[0] if matching_paths else (
-        f"{site_id}-mobile" if profile == "mobile/app" else f"{site_id}-wall10"
-    )
-    if matching_paths:
+    if matching_targets:
+        storage_path, installed_profile_path = matching_targets[0]
+        panel_id = installed_profile_path or storage_path
         site_id = (
-            panel_id.removesuffix("-mobile")
-            if profile == "mobile/app" and panel_id.endswith("-mobile")
-            else panel_id
+            storage_path.removesuffix("-mobile")
+            if profile == "mobile/app" and storage_path.endswith("-mobile")
+            else storage_path
         )
         target["site"] = {**target["site"], "id": site_id}
+    else:
+        panel_id = (
+            f"{site_id}-mobile" if profile == "mobile/app" else f"{site_id}-wall10"
+        )
     if profile == "mobile/app":
         target["site"]["title"] = f'{target["site"]["title"]} Mobile'
     target["panel"] = {
@@ -750,16 +760,15 @@ def _compose_dashboard(
         composed: list[Any] = []
         for existing in views:
             path = str(existing.get("path") or "") if isinstance(existing, dict) else ""
+            if _managed_foundation_view(existing):
+                if path in generated_by_path:
+                    composed.append(deepcopy(existing))
+                    preserved_paths.add(path)
+                # A previously managed optional route is removed when disabled.
+                continue
             if path in replacement_paths:
                 composed.append(generated_by_path[path])
                 consumed_paths.add(path)
-                continue
-            if _managed_foundation_view(existing):
-                replacement = generated_by_path.get(path)
-                if replacement is not None:
-                    composed.append(replacement)
-                    consumed_paths.add(path)
-                # A previously managed optional route is removed when disabled.
                 continue
             composed.append(deepcopy(existing))
             if path:
