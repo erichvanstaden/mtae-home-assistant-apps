@@ -27,17 +27,17 @@ CATALOGUE_SCHEMA = "mtae.van-gogh.feature-catalogue.v1"
 PRODUCT_SCHEMA_VERSION = 2
 FOUNDATION_BUNDLE_ID = "van-gogh-foundation-site-neutral"
 FOUNDATION_VERSION = "1.5.0"
-FRONTEND_VERSION = "2.0.0-suite.1"
 SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?$")
 PATH = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 SECRET_WORDS = re.compile(r"(?:password|secret|token|credential|api[_-]?key|install[_-]?code)", re.I)
 PRODUCT_MARKER = "van_gogh_product"
 MANAGED_FOUNDATION = "van_gogh_managed_foundation"
-FOUNDATION_TARGETS = {
+LEGACY_FOUNDATION_TARGETS = {
     "assets": Path("www") / "van-gogh" / FOUNDATION_VERSION,
-    "frontend": Path("www") / "van-gogh2" / FRONTEND_VERSION,
+    "frontend": Path("www") / "van-gogh2" / "2.0.0-suite.1",
     "owner_maintenance": Path("custom_components") / "mtae_owner_maintenance",
 }
+FOUNDATION_KEYS = frozenset(LEGACY_FOUNDATION_TARGETS)
 SUPPORTED_DASHBOARD_TARGETS = ("wall-10", "mobile/app")
 
 
@@ -64,6 +64,71 @@ class ProductPlan:
     dashboard_changed: bool
 
 
+def _foundation_targets(package: ProductPackage) -> dict[str, Path]:
+    """Derive the immutable frontend directory from verified package identity."""
+    manifest = package.manifest
+    build_identity = manifest.get("build_identity")
+    release_version = (
+        build_identity.get("release_component_version")
+        if isinstance(build_identity, dict)
+        else None
+    )
+    if not isinstance(release_version, str):
+        raise ProductUpdateError("Product-package frontend release identity is missing")
+    _version(release_version)
+    if (
+        manifest.get("package_version") != release_version
+        or manifest.get("component_version") != release_version
+    ):
+        raise ProductUpdateError("Product-package frontend release identity is inconsistent")
+    expected_url = f"/local/van-gogh2/{release_version}/van-gogh2.js"
+    if manifest.get("resource_url") != expected_url:
+        raise ProductUpdateError("Product-package frontend resource URL is inconsistent")
+    return {
+        "assets": LEGACY_FOUNDATION_TARGETS["assets"],
+        "frontend": Path("www") / "van-gogh2" / release_version,
+        "owner_maintenance": LEGACY_FOUNDATION_TARGETS["owner_maintenance"],
+    }
+
+
+def _foundation_sources(package: ProductPackage, release_root: Path) -> dict[str, Path]:
+    targets = _foundation_targets(package)
+    return {
+        "assets": release_root / "assets",
+        "frontend": release_root.parent / "package" / targets["frontend"],
+        "owner_maintenance": release_root / "custom_components" / "mtae_owner_maintenance",
+    }
+
+
+def _foundation_receipt_target(row: dict[str, Any]) -> Path:
+    """Return one receipt-owned target while rejecting config-root escape paths."""
+    key = row.get("key")
+    if key not in FOUNDATION_KEYS:
+        raise ProductUpdateError("Product-update Foundation rollback receipt is invalid")
+    raw_target = row.get("target")
+    if raw_target is None:
+        # Compatibility with receipts written by Installer <=1.2.13.
+        return LEGACY_FOUNDATION_TARGETS[key]
+    if not isinstance(raw_target, str) or not raw_target:
+        raise ProductUpdateError("Product-update Foundation rollback receipt is invalid")
+    target = Path(raw_target)
+    if target.is_absolute() or ".." in target.parts:
+        raise ProductUpdateError("Product-update Foundation rollback receipt is invalid")
+    if key in {"assets", "owner_maintenance"}:
+        if target != LEGACY_FOUNDATION_TARGETS[key]:
+            raise ProductUpdateError("Product-update Foundation rollback receipt is invalid")
+        return target
+    if len(target.parts) != 3 or target.parts[:2] != ("www", "van-gogh2"):
+        raise ProductUpdateError("Product-update Foundation rollback receipt is invalid")
+    try:
+        _version(target.parts[2])
+    except ProductUpdateError as error:
+        raise ProductUpdateError(
+            "Product-update Foundation rollback receipt is invalid"
+        ) from error
+    return target
+
+
 def _json_member(package: tarfile.TarFile, name: str) -> dict[str, Any]:
     try:
         member = package.getmember(name)
@@ -77,8 +142,34 @@ def _json_member(package: tarfile.TarFile, name: str) -> dict[str, Any]:
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ProductUpdateError(f"Product package member {name} is invalid JSON") from error
     if not isinstance(value, dict):
-        raise ProductUpdateError(f"Product package member {name} must be an object")
+        raise ProductUpdateError(f"Product package member {name} must be a JSON object")
     return value
+
+
+def _text_member(package: tarfile.TarFile, name: str) -> str:
+    try:
+        member = package.getmember(name)
+        stream = package.extractfile(member)
+    except (KeyError, OSError, tarfile.TarError) as error:
+        raise ProductUpdateError(f"Product package is missing {name}") from error
+    if member.issym() or member.islnk() or not member.isfile() or stream is None:
+        raise ProductUpdateError(f"Product package member {name} must be a regular file")
+    try:
+        return stream.read().decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ProductUpdateError(f"Product package member {name} must be UTF-8") from error
+
+
+def _frontend_identity_module(identity: dict[str, Any]) -> str:
+    return (
+        "export const FRONTEND_IDENTITY = Object.freeze({\n"
+        f'  schema: "{identity["schema"]}",\n'
+        f'  product_version: "{identity["product_version"]}",\n'
+        f'  build_id: "{identity["build_id"]}",\n'
+        f'  builder_write_protocol: "{identity["builder_write_protocol"]}",\n'
+        f'  profile_catalogue_sha256: "{identity["profile_catalogue_sha256"]}",\n'
+        "});\n"
+    )
 
 
 def _version(value: Any) -> tuple[int, int, int, tuple[tuple[int, str], ...]]:
@@ -158,6 +249,25 @@ def inspect_package(archive: Path, expected_sha256: str | None = None) -> Produc
             site_schema = _json_member(package, site_schema_path)
             bundle = _json_member(package, str(foundation.get("bundle_manifest") or ""))
             component = _json_member(package, "custom_components/van_gogh2/manifest.json")
+            backend_identity = _json_member(
+                package, "custom_components/van_gogh2/frontend-identity.json"
+            )
+            source_build_identity = manifest.get("build_identity")
+            source_release_version = (
+                source_build_identity.get("release_component_version")
+                if isinstance(source_build_identity, dict)
+                else None
+            )
+            if not isinstance(source_release_version, str):
+                raise ProductUpdateError("Product-package frontend release identity is missing")
+            _version(source_release_version)
+            canonical_frontend_identity = _text_member(
+                package, "frontend/frontend-identity.js"
+            )
+            runtime_frontend_identity = _text_member(
+                package,
+                f"www/van-gogh2/{source_release_version}/frontend-identity.js",
+            )
     except (OSError, tarfile.TarError) as error:
         raise ProductUpdateError("Product package is not a readable gzip tar archive") from error
     if component.get("domain") != "van_gogh2" or component.get("version") != manifest.get("component_version"):
@@ -182,7 +292,37 @@ def inspect_package(archive: Path, expected_sha256: str | None = None) -> Produc
         or catalogue.get("foundation_version") != FOUNDATION_VERSION
     ):
         raise ProductUpdateError("Feature catalogue does not target the bundled Foundation")
-    return ProductPackage(manifest, catalogue, site_schema, archive, actual_sha)
+    result = ProductPackage(manifest, catalogue, site_schema, archive, actual_sha)
+    _foundation_targets(result)
+    build_identity = manifest.get("build_identity")
+    if not isinstance(build_identity, dict):
+        raise ProductUpdateError("Product-package frontend build identity is missing")
+    expected_frontend_identity = {
+        "schema": "mtae.van-gogh.frontend-identity.v1",
+        "product_version": build_identity["release_component_version"],
+        "build_id": build_identity.get("build_id"),
+        "builder_write_protocol": build_identity.get("builder_write_protocol"),
+        "profile_catalogue_sha256": build_identity.get("profile_catalogue_sha256"),
+    }
+    expected_frontend_module = _frontend_identity_module(expected_frontend_identity)
+    if backend_identity != expected_frontend_identity or (
+        canonical_frontend_identity != expected_frontend_module
+        or runtime_frontend_identity != expected_frontend_module
+    ):
+        raise ProductUpdateError("Product-package frontend/backend identity is inconsistent")
+    if (
+        build_identity.get("schema") != "mtae.van-gogh.build-identity.v1"
+        or not isinstance(build_identity.get("build_id"), str)
+        or not re.fullmatch(r"[0-9a-f]{16}", build_identity["build_id"])
+        or build_identity.get("builder_write_protocol")
+        != "mtae.van-gogh.builder-write.v1"
+        or not isinstance(build_identity.get("profile_catalogue_sha256"), str)
+        or not re.fullmatch(
+            r"[0-9a-f]{64}", build_identity["profile_catalogue_sha256"]
+        )
+    ):
+        raise ProductUpdateError("Product-package frontend build identity is invalid")
+    return result
 
 
 def _contains_secret_key(value: Any) -> bool:
@@ -931,13 +1071,6 @@ class ProductUpdateManager:
         self.installer_version = installer_version
         self._pending_apply: dict[str, Any] | None = None
 
-    def _foundation_sources(self, release_root: Path) -> dict[str, Path]:
-        return {
-            "assets": release_root / "assets",
-            "frontend": release_root.parent / "package" / "www" / "van-gogh2" / FRONTEND_VERSION,
-            "owner_maintenance": release_root / "custom_components" / "mtae_owner_maintenance",
-        }
-
     def _managed_files_current(self, package: ProductPackage, release_root: Path) -> bool:
         component_actual = _tree_inventory(
             self.installer.target,
@@ -945,23 +1078,31 @@ class ProductUpdateManager:
         )
         if component_actual != _component_expected_inventory(package):
             return False
-        for key, source in self._foundation_sources(release_root).items():
+        targets = _foundation_targets(package)
+        for key, source in _foundation_sources(package, release_root).items():
             expected = _tree_inventory(source)
-            target = self.installer.config_root / FOUNDATION_TARGETS[key]
+            target = self.installer.config_root / targets[key]
             if expected is None or _tree_inventory(target) != expected:
                 return False
         return True
 
-    def _install_foundation_files(self, release_root: Path, backup_id: str) -> list[dict[str, Any]]:
+    def _install_foundation_files(
+        self,
+        package: ProductPackage,
+        release_root: Path,
+        backup_id: str,
+    ) -> list[dict[str, Any]]:
         backup_root = self.installer.backups / backup_id / "product-files"
         backup_root.mkdir(parents=True, exist_ok=False)
         rows: list[dict[str, Any]] = []
-        completed: list[str] = []
+        completed: list[tuple[str, Path]] = []
+        targets = _foundation_targets(package)
         try:
-            for key, source in self._foundation_sources(release_root).items():
+            for key, source in _foundation_sources(package, release_root).items():
                 if not source.is_dir():
                     raise ProductUpdateError(f"Generated Foundation release is missing {key}")
-                target = self.installer.config_root / FOUNDATION_TARGETS[key]
+                relative_target = targets[key]
+                target = self.installer.config_root / relative_target
                 previous_present = target.is_dir()
                 created_parent_dirs: list[str] = []
                 parent = target.parent
@@ -981,15 +1122,15 @@ class ProductUpdateManager:
                     os.replace(target, displaced)
                 os.replace(stage, target)
                 shutil.rmtree(displaced, ignore_errors=True)
-                completed.append(key)
+                completed.append((key, target))
                 rows.append({
                     "key": key,
+                    "target": relative_target.as_posix(),
                     "previous_present": previous_present,
                     "created_parent_dirs": created_parent_dirs,
                 })
         except Exception:
-            for key in reversed(completed):
-                target = self.installer.config_root / FOUNDATION_TARGETS[key]
+            for key, target in reversed(completed):
                 shutil.rmtree(target, ignore_errors=True)
                 previous = backup_root / key
                 if previous.is_dir():
@@ -1009,7 +1150,7 @@ class ProductUpdateManager:
         plan: list[tuple[str, Path, Path | None]] = []
         seen: set[str] = set()
         for row in rows:
-            if not isinstance(row, dict) or row.get("key") not in FOUNDATION_TARGETS:
+            if not isinstance(row, dict) or row.get("key") not in FOUNDATION_KEYS:
                 raise ProductUpdateError("Product-update Foundation rollback receipt is invalid")
             key = row["key"]
             previous_present = row.get("previous_present")
@@ -1018,9 +1159,11 @@ class ProductUpdateManager:
             source = backup_root / key if previous_present else None
             if source is not None and (not source.is_dir() or source.is_symlink()):
                 raise ProductUpdateError(f"Foundation rollback backup is missing {key}")
-            plan.append((key, self.installer.config_root / FOUNDATION_TARGETS[key], source))
+            plan.append(
+                (key, self.installer.config_root / _foundation_receipt_target(row), source)
+            )
             seen.add(key)
-        if seen != set(FOUNDATION_TARGETS):
+        if seen != FOUNDATION_KEYS:
             raise ProductUpdateError("Product-update Foundation rollback receipt is incomplete")
         return plan
 
@@ -1183,30 +1326,13 @@ class ProductUpdateManager:
         *,
         defer_commit: bool = False,
     ) -> dict[str, Any]:
-        """Install runtime/Foundation files while Builder owns all user dashboards."""
-        package = inspect_package(archive, str(release.get("sha256") or ""))
-        route_replacements = package.manifest.get("dashboard_route_replacements", {})
-        if not isinstance(route_replacements, dict):
-            raise ProductUpdateError(
-                "Product-package dashboard route replacements are invalid"
-            )
-        requested_profiles = [
-            profile
-            for profile in SUPPORTED_DASHBOARD_TARGETS
-            if route_replacements.get(profile)
-        ]
-        if requested_profiles:
-            # Builder retains dashboard structure. Explicit package route
-            # replacements are the bounded exception: the normal transaction
-            # preserves every other route and captures exact prestates.
-            return self.apply(
-                archive,
-                release,
-                site_manifest_path,
-                home_assistant_version,
-                dashboard_targets=requested_profiles,
-                defer_commit=defer_commit,
-            )
+        """Install runtime/Foundation files without writing user dashboards.
+
+        A package may describe route replacements for a separately governed
+        migration, but that metadata does not opt a normal product install into
+        dashboard mutation.  An authorised migration must call ``apply`` with
+        explicit ``dashboard_targets`` instead.
+        """
         return self.apply(
             archive,
             release,
@@ -1324,7 +1450,11 @@ class ProductUpdateManager:
                     defer_commit=True,
                 )
                 component_changed = True
-                foundation_rows = self._install_foundation_files(release_root, install_receipt["backup_id"])
+                foundation_rows = self._install_foundation_files(
+                    package,
+                    release_root,
+                    install_receipt["backup_id"],
+                )
                 foundation_changed = True
                 for plan in plans:
                     if not plan.dashboard_changed:

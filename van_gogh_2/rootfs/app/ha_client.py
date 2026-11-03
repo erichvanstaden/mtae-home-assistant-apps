@@ -18,10 +18,9 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 DOMAIN = "van_gogh2"
-MODULE_URL = "/local/van-gogh2/2.0.0-suite.1/van-gogh2.js"
 MODULE_URL_PATTERN = re.compile(
     r"^/local/van-gogh2/[0-9A-Za-z][0-9A-Za-z.-]{0,127}/"
-    r"van-gogh2\.js\?v=[0-9A-Za-z][0-9A-Za-z.-]{0,127}$"
+    r"van-gogh2\.js$"
 )
 BUILDER_DASHBOARD_PATH = "van-gogh-builder"
 BUILDER_DASHBOARD_TITLE = "Van Gogh Builder"
@@ -79,7 +78,7 @@ def module_url_for_release(release_version: str) -> str:
         or not RELEASE_VERSION_PATTERN.fullmatch(release_version)
     ):
         raise HAError("Van Gogh release manifest version is invalid")
-    return f"{MODULE_URL}?v={release_version}"
+    return f"/local/van-gogh2/{release_version}/van-gogh2.js"
 
 
 def validate_module_url(module_url: str) -> str:
@@ -111,7 +110,7 @@ def _resource_type(item: dict[str, Any]) -> Any:
     return item.get("res_type") or item.get("type")
 
 
-def resource_plan(resources: list[dict[str, Any]], module_url: str = MODULE_URL) -> list[dict[str, Any]]:
+def resource_plan(resources: list[dict[str, Any]], module_url: str) -> list[dict[str, Any]]:
     """Return deterministic create/update/delete actions leaving one exact module resource."""
     owned = [item for item in resources if _is_van_gogh_resource(item)]
     exact = [item for item in owned if item.get("url") == module_url and _resource_type(item) == "module"]
@@ -842,7 +841,7 @@ class HAClient:
             time.sleep(2)
         raise HAError("Van Gogh integration entry did not reach loaded state")
 
-    def ensure_resource(self, module_url: str = MODULE_URL) -> dict[str, Any]:
+    def ensure_resource(self, module_url: str) -> dict[str, Any]:
         validate_module_url(module_url)
         with self.websocket() as connection:
             resources = connection.call({"type": "lovelace/resources"})
@@ -896,7 +895,7 @@ class HAClient:
 
     def probe_module(
         self,
-        module_url: str = MODULE_URL,
+        module_url: str,
         timeout: float = 60.0,
         poll_interval: float = 2.0,
     ) -> dict[str, Any]:

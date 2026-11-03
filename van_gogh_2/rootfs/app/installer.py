@@ -379,12 +379,23 @@ class InstallManager:
             "created_utc": now,
             "previous_present": previous_present,
             "previous_version": previous_version,
+            "previous_receipt_present": transaction["current_bytes"] is not None,
+            "previous_receipt_mode": transaction["current_mode"],
+            "previous_receipt_sha256": (
+                hashlib.sha256(transaction["current_bytes"]).hexdigest()
+                if transaction["current_bytes"] is not None
+                else None
+            ),
         }
         try:
             backup.mkdir(parents=True, exist_ok=False)
             transaction["backup_created"] = True
             if previous_present:
                 shutil.copytree(self.target, backup / COMPONENT)
+            if transaction["current_bytes"] is not None:
+                (backup / "current-receipt.prestate").write_bytes(
+                    transaction["current_bytes"]
+                )
             _write_json_atomic(backup / "receipt.json", backup_receipt)
 
             self.target.parent.mkdir(parents=True, exist_ok=True)
@@ -547,12 +558,35 @@ class InstallManager:
         source = backup / COMPONENT
         if previous_present and (not source.is_dir() or source.is_symlink()):
             raise InstallError("Rollback integration backup is missing")
+        previous_receipt_present = backup_receipt.get("previous_receipt_present", False)
+        if not isinstance(previous_receipt_present, bool):
+            raise InstallError("Rollback backup receipt has invalid receipt prestate")
+        previous_receipt_source = backup / "current-receipt.prestate"
+        if previous_receipt_present:
+            previous_receipt_mode = backup_receipt.get("previous_receipt_mode")
+            previous_receipt_sha256 = backup_receipt.get("previous_receipt_sha256")
+            if (
+                not previous_receipt_source.is_file()
+                or previous_receipt_source.is_symlink()
+                or not isinstance(previous_receipt_mode, int)
+                or not 0 <= previous_receipt_mode <= 0o777
+                or not isinstance(previous_receipt_sha256, str)
+                or len(previous_receipt_sha256) != 64
+                or sha256_file(previous_receipt_source) != previous_receipt_sha256
+            ):
+                raise InstallError("Rollback receipt prestate is invalid")
         return current, backup_id, backup_receipt, source
 
     def stage_rollback(self) -> dict[str, Any]:
         """Stage the predecessor component without changing the installed component."""
         current, backup_id, backup_receipt, source = self.rollback_preflight()
         previous_present = backup_receipt["previous_present"]
+        previous_receipt_source = self.backups / backup_id / "current-receipt.prestate"
+        previous_receipt_bytes = (
+            previous_receipt_source.read_bytes()
+            if backup_receipt.get("previous_receipt_present", False)
+            else None
+        )
 
         self.target.parent.mkdir(parents=True, exist_ok=True)
         stage = self.target.parent / f".{COMPONENT}.rollback.{uuid.uuid4().hex}"
@@ -566,8 +600,12 @@ class InstallManager:
 
         return {
             "current": current,
+            "current_bytes": self.current_receipt.read_bytes(),
+            "current_mode": self.current_receipt.stat().st_mode & 0o777,
             "backup_id": backup_id,
             "backup_receipt": backup_receipt,
+            "previous_receipt_bytes": previous_receipt_bytes,
+            "previous_receipt_mode": backup_receipt.get("previous_receipt_mode"),
             "stage": stage,
             "displaced": displaced,
             "moved_current": False,
@@ -626,6 +664,7 @@ class InstallManager:
             "rolled_back_backup_id": backup_id,
             "completed_utc": now,
             "restored_present": backup_receipt["previous_present"],
+            "restored_previous_receipt": transaction["previous_receipt_bytes"] is not None,
             "restored_version": backup_receipt.get("previous_version"),
             "restart_required": True,
             "target": str(self.target),
@@ -636,9 +675,18 @@ class InstallManager:
         operations_existed = self.operations.exists()
         try:
             _write_json_atomic(operation_receipt, receipt)
-            self.current_receipt.unlink()
+            self._restore_file(
+                self.current_receipt,
+                transaction["previous_receipt_bytes"],
+                transaction["previous_receipt_mode"],
+            )
         except Exception:
             operation_receipt.unlink(missing_ok=True)
+            self._restore_file(
+                self.current_receipt,
+                transaction["current_bytes"],
+                transaction["current_mode"],
+            )
             if not operations_existed:
                 try:
                     self.operations.rmdir()
