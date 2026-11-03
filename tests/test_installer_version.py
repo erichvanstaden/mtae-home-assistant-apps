@@ -6,7 +6,11 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_VERSION = "1.2.13"
+EXPECTED_VERSION = "1.2.14"
+EXPECTED_PRODUCT = (
+    "2.0.0-suite.2-owner-corrections.66-mobile-stage5.8-"
+    "checkpoint6-all-off.28-builder-runtime-guard.1"
+)
 
 
 class InstallerVersionConsistencyTests(unittest.TestCase):
@@ -31,11 +35,11 @@ class InstallerVersionConsistencyTests(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         changelog = (ROOT / "van_gogh_2/CHANGELOG.md").read_text(encoding="utf-8")
         self.assertIn(f"Installer `{EXPECTED_VERSION}`", readme)
-        self.assertIn("2.0.0-suite.2-owner-corrections.65", readme)
+        self.assertIn(EXPECTED_PRODUCT, readme)
         self.assertIn(f"## {EXPECTED_VERSION}", changelog)
-        self.assertIn("2.0.0-suite.2-owner-corrections.65", changelog)
-        self.assertIn("from exact Product `.59`", changelog)
-        self.assertIn("retaining exact Product `.59` as rollback", changelog)
+        self.assertIn(EXPECTED_PRODUCT, changelog)
+        self.assertIn("from immutable Correction-27", changelog)
+        self.assertIn("preserving published Installer `1.2.13`", changelog)
 
     def test_aarch64_build_requires_binary_cp314_dependencies(self) -> None:
         dockerfile = (ROOT / "van_gogh_2/Dockerfile").read_text(encoding="utf-8")

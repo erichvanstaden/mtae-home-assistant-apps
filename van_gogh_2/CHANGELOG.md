@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.14
+
+- Derive the immutable Van Gogh frontend source and install target from the verified product package release identity instead of a fixed historical frontend directory.
+- Require the product package, integration manifest, backend identity, frontend identity, resource URL and build identity to agree before any product write.
+- Qualify unpublished Product `2.0.0-suite.2-owner-corrections.66-mobile-stage5.8-checkpoint6-all-off.28-builder-runtime-guard.1` from immutable Correction-27 while preserving published Installer `1.2.13`; no publication, live-system change or equipment actuation is included.
+
 ## 1.2.13
 
 - Preserve every existing owner-edited managed Foundation view exactly when its route remains present during an in-place Product upgrade, including native edit markers and nested card configuration.
